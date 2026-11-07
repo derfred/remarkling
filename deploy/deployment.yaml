@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inkbridge
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # RWO volume + SQLite: one pod at a time
+  selector:
+    matchLabels: {app: inkbridge}
+  template:
+    metadata:
+      labels: {app: inkbridge}
+    spec:
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - name: server
+          image: inkbridge
+          args: ["inkbridge", "serve", "--port", "8000"]
+          envFrom:
+            - secretRef: {name: inkbridge}
+          env:
+            - {name: DATA_DIR, value: /data}
+          ports:
+            - {name: http, containerPort: 8000}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {memory: 1536Mi}  # Chromium renders and 2x page PNGs
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: shm, mountPath: /dev/shm}
+        - name: poller
+          image: inkbridge
+          args: ["python", "-m", "inkbridge.poller"]
+          envFrom:
+            - secretRef: {name: inkbridge}
+          env:
+            - {name: DATA_DIR, value: /data}
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: inkbridge-data}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}

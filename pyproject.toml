@@ -1,0 +1,36 @@
+[project]
+name = "inkbridge"
+version = "0.1.0"
+description = "Push content to a reMarkable tablet, pull handwritten markup back as structured feedback."
+requires-python = ">=3.11"
+dependencies = [
+  "anthropic>=0.40",
+  "fastapi>=0.110",
+  "httpx>=0.27",
+  "markdown-it-py>=3.0",
+  "mcp>=2.0,<3",
+  "pikepdf>=8.0",
+  "pillow>=10",
+  "playwright>=1.44",
+  "pymupdf>=1.24",
+  "python-multipart>=0.0.9",
+  "rmscene==0.8.0",
+  "uvicorn[standard]>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+inkbridge = "inkbridge.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["inkbridge*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

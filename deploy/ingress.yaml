@@ -1,0 +1,21 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: inkbridge
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/proxy-body-size: 50m
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [inkbridge.remarkling.co]
+      secretName: inkbridge-tls
+  rules:
+    - host: inkbridge.remarkling.co
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: inkbridge, port: {name: http}}
