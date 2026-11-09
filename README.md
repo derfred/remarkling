@@ -28,7 +28,7 @@ inkbridge/
   poller.py        # poll_outbox() every POLL_INTERVAL_S
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
 prompts/interpret.md
-deploy/            # Kustomize: deployment (server + poller), pvc, service, ingress, secret example
+k8s/               # deployment (server + poller), pvc, service, ingress; rendered by scripts/deploy.sh
 ```
 
 ## Local setup
@@ -43,7 +43,7 @@ inkbridge poll                   # M2/M3
 pytest
 ```
 
-Configuration is environment-only; see `inkbridge/config.py` and `deploy/secret.example.yaml`.
+Configuration is environment-only; see `inkbridge/config.py` and `.env.example`.
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
@@ -63,15 +63,31 @@ These are assumptions the code makes that only the real tablet and cloud can con
 
 ## Deploy (M5)
 
+Runs on the bugzoo cluster as a **custom app** of
+[bugzoo-infrastructure](https://github.com/derfred/bugzoo-infrastructure): that repo owns the
+`remarkling` namespace, the `registry` image pull secret and the `app` ServiceAccount
+(`customApps.apps.remarkling` in `environments/bugzoo/cluster.libsonnet`). Everything inside the
+namespace is deployed from here.
+
+- **CI** (`.github/workflows/ci.yml`) runs the tests, then builds and pushes
+  `ghcr.io/derfred/remarkling:sha-<full sha>` on every push (`:latest` on `main`).
+- **Deploy** with `scripts/deploy.sh [sha]` (default `HEAD`). It checks that CI built the image,
+  creates the `remarkling-secrets` Secret from `.env.production`, renders `k8s/*.yaml` and applies
+  them with `kubectl apply --server-side` (the `app` identity can write but not read Secrets).
+
 ```sh
-docker build -t ghcr.io/remarkling/inkbridge:latest . && docker push ghcr.io/remarkling/inkbridge:latest
-cp deploy/secret.example.yaml deploy/secret.yaml   # fill in, never commit
-kubectl apply -f deploy/secret.yaml && kubectl apply -k deploy/
+cp .env.example .env.production          # fill in, never commit
+# kubeconfig for the `app` ServiceAccount: minted from bugzoo-infrastructure,
+# see environments/bugzoo/custom-apps/README.md ("Handing the app to its team")
+export KUBECONFIG=remarkling.kubeconfig  # or drop it in the repo root; it is gitignored
+scripts/deploy.sh
 ```
 
-One Deployment, two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are serialised by an
-asyncio lock in-process and a file lock on the volume across containers. Rendered files are pruned
-after `RETENTION_DAYS` (30); feedback JSON stays in SQLite.
+One Deployment (`Recreate`), two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are
+serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered
+files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in SQLite. Trilium is reached
+in-cluster at `http://trilium.trilium.svc.cluster.local`. `DOMAIN` needs a DNS record pointing at
+the bugzoo ingress; cert-manager (`letsencrypt-prod`) issues the certificate.
 
 ## iPhone Shortcuts (M6)
 
