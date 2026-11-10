@@ -7,3 +7,4 @@ tests
 k8s
 scripts
 .github
+.venv

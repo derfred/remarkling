@@ -16,16 +16,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
-          cache: pip
+          enable-cache: true
 
-      - run: pip install -e '.[dev]'
+      - run: uv sync --locked
 
-      - run: python -m playwright install --with-deps chromium
+      - run: uv run playwright install --with-deps chromium
 
-      - run: pytest
+      - run: uv run pytest
 
       - run: bash -n scripts/deploy.sh
 

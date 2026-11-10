@@ -11,14 +11,14 @@ dependencies = [
   "mcp>=2.0,<3",
   "pikepdf>=8.0",
   "pillow>=10",
-  "playwright>=1.44",
+  "playwright==1.64.1",  # must match the Playwright base image tag in Dockerfile
   "pymupdf>=1.24",
   "python-multipart>=0.0.9",
   "rmscene==0.8.0",
   "uvicorn[standard]>=0.29",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]

@@ -34,14 +34,16 @@ k8s/               # deployment (server + poller), pvc, service; ingress/ option
 ## Local setup
 
 ```sh
-python -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]' && playwright install chromium
-inkbridge register <code>        # code from my.remarkable.com/device/desktop/connect
+uv sync                          # creates .venv from uv.lock, dev group included
+uv run playwright install chromium
+uv run inkbridge register <code> # code from my.remarkable.com/device/desktop/connect
 export RM_DEVICE_TOKEN=... ANTHROPIC_API_KEY=...
-inkbridge push spec.html         # M1
-inkbridge poll                   # M2/M3
-pytest
+uv run inkbridge push spec.html  # M1
+uv run inkbridge poll            # M2/M3
+uv run pytest
 ```
+
+Add or bump dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit `uv.lock`.
 
 Configuration is environment-only; see `inkbridge/config.py` and `.env.example`.
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
