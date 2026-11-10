@@ -7,3 +7,4 @@ data/
 .env.production
 *.kubeconfig
 .deploy-overlay.*/
+.env
