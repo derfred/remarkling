@@ -1,0 +1,85 @@
+# Part of the kustomization in this directory (see kustomization.yaml).
+#
+# All env comes from the `remarkling-secrets` Secret, which the platform
+# provider injects into the namespace (this repo never creates or reads it).
+# Every key in it becomes an env var (see inkbridge/config.py):
+#   required: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY, API_TOKEN, MCP_TOKEN,
+#             MCP_ALLOWED_HOSTS (the public hostname)
+#   Trilium:  TRILIUM_URL, TRILIUM_PUBLIC_URL, TRILIUM_PARENT_NOTE, TRILIUM_ETAPI_TOKEN
+#   optional: POLL_INTERVAL_S, RETENTION_DAYS, INTERPRET_MODEL, ...
+# Env is read only at start: after the provider changes the Secret,
+# `kubectl -n remarkling rollout restart deploy/remarkling`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remarkling
+  namespace: remarkling
+  labels:
+    app.kubernetes.io/name: remarkling
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # RWO volume + SQLite: one pod at a time
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: remarkling
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: remarkling
+    spec:
+      # The `default` ServiceAccount carries the `registry` pull secret
+      # (bugzoo-infrastructure custom-app stub).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001   # pwuser in the Playwright image (asserted in the Dockerfile)
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/derfred/remarkling  # tag set by kustomization.yaml / deploy.sh
+          args: ["inkbridge", "serve", "--port", "8000"]
+          securityContext: &containerSecurity
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          envFrom: &envFrom
+            - secretRef:
+                name: remarkling-secrets  # injected by the provider
+          env: &env
+            - {name: DATA_DIR, value: /data}
+          ports:
+            - {name: http, containerPort: 8000, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {cpu: "2", memory: 1536Mi}  # Chromium renders and 2x page PNGs
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: shm, mountPath: /dev/shm}
+        - name: poller
+          image: ghcr.io/derfred/remarkling  # tag set by kustomization.yaml / deploy.sh
+          args: ["python", "-m", "inkbridge.poller"]
+          securityContext: *containerSecurity
+          envFrom: *envFrom
+          env: *env
+          resources:
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: remarkling-data
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}

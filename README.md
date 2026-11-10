@@ -28,7 +28,7 @@ inkbridge/
   poller.py        # poll_outbox() every POLL_INTERVAL_S
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
 prompts/interpret.md
-deploy/            # Kustomize: deployment (server + poller), pvc, service, ingress, secret example
+k8s/               # deployment (server + poller), pvc, service; ingress/ optional; applied by scripts/deploy.sh
 ```
 
 ## Local setup
@@ -43,7 +43,7 @@ inkbridge poll                   # M2/M3
 pytest
 ```
 
-Configuration is environment-only; see `inkbridge/config.py` and `deploy/secret.example.yaml`.
+Configuration is environment-only; see `inkbridge/config.py` and `.env.example`.
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
@@ -63,15 +63,46 @@ These are assumptions the code makes that only the real tablet and cloud can con
 
 ## Deploy (M5)
 
+Runs on the bugzoo cluster as a **custom app** of
+[bugzoo-infrastructure](https://github.com/derfred/bugzoo-infrastructure): that repo owns the
+`remarkling` namespace, the `registry` image pull secret and the `app` ServiceAccount
+(`customApps.apps.remarkling` in `environments/bugzoo/cluster.libsonnet`). Everything inside the
+namespace is deployed from here.
+
+- **CI** (`.github/workflows/ci.yml`) runs the tests, then builds and pushes
+  `ghcr.io/derfred/remarkling:sha-<full sha>` on every push (`:latest` on `main`).
+- **Configuration** comes entirely from the `remarkling-secrets` Secret, which the provider injects
+  into the namespace; this repo never creates or reads it, and holds no instance-specific values.
+  Every key becomes an env var (`inkbridge/config.py`). Required: `RM_DEVICE_TOKEN`,
+  `ANTHROPIC_API_KEY`, `API_TOKEN`, `MCP_TOKEN`, `MCP_ALLOWED_HOSTS` (the public hostname). For
+  Trilium: `TRILIUM_URL` (in-cluster, e.g. `http://trilium.trilium.svc.cluster.local`),
+  `TRILIUM_PUBLIC_URL`, `TRILIUM_PARENT_NOTE`, `TRILIUM_ETAPI_TOKEN`. Anything else in
+  `config.py` (`POLL_INTERVAL_S`, `RETENTION_DAYS`, ...) is optional. Pods don't start
+  (`CreateContainerConfigError`) until the Secret exists. Env is read only at start, so after the
+  provider changes it: `kubectl -n remarkling rollout restart deploy/remarkling`.
+- **Manifests** are a kustomization in `k8s/` (`kubectl kustomize k8s` shows the result): PVC,
+  Deployment, Service. It has no Ingress; `k8s/ingress/` holds an optional one with a placeholder
+  hostname.
+- **Deploy** with `[DOMAIN=<host>] scripts/deploy.sh [sha]` (default `HEAD`). It checks that CI
+  built the image, pins `sha-<sha>` in a throwaway overlay and runs `kubectl apply -k --server-side`
+  (the `app` identity can write but not read Secrets), then waits for the rollout. With `DOMAIN`
+  set it also applies `k8s/ingress/` for that hostname (nginx, cert-manager `letsencrypt-prod`);
+  without it, no Ingress is touched.
+- **Other deployers** (e.g. tanka) can render the base `k8s/` as is (tanka-util's
+  `kustomize.build`) and add their own Ingress to Service `remarkling`, port `http`. Set
+  `MCP_ALLOWED_HOSTS` in the Secret to the hostname it serves.
+
 ```sh
-docker build -t ghcr.io/remarkling/inkbridge:latest . && docker push ghcr.io/remarkling/inkbridge:latest
-cp deploy/secret.example.yaml deploy/secret.yaml   # fill in, never commit
-kubectl apply -f deploy/secret.yaml && kubectl apply -k deploy/
+# kubeconfig for the `app` ServiceAccount: minted from bugzoo-infrastructure,
+# see environments/bugzoo/custom-apps/README.md ("Handing the app to its team")
+export KUBECONFIG=remarkling.kubeconfig  # or drop it in the repo root; it is gitignored
+DOMAIN=remarkling.example.com scripts/deploy.sh
 ```
 
-One Deployment, two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are serialised by an
-asyncio lock in-process and a file lock on the volume across containers. Rendered files are pruned
-after `RETENTION_DAYS` (30); feedback JSON stays in SQLite.
+One Deployment (`Recreate`), two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are
+serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered
+files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in SQLite. The public hostname
+needs a DNS record pointing at the cluster's ingress.
 
 ## iPhone Shortcuts (M6)
 

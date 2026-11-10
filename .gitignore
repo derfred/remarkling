@@ -4,4 +4,6 @@ __pycache__/
 .pytest_cache/
 data/
 *.sqlite3
-deploy/secret.yaml
+.env.production
+*.kubeconfig
+.deploy-overlay.*/

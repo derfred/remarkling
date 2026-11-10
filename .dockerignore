@@ -2,3 +2,8 @@
 data
 tests
 **/__pycache__
+.env*
+*.kubeconfig
+k8s
+scripts
+.github

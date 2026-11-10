@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: remarkling
+  namespace: remarkling
+  labels:
+    app.kubernetes.io/name: remarkling
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: remarkling

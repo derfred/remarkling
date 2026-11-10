@@ -1,0 +1,23 @@
+# Applied by scripts/deploy.sh with `kubectl apply -k` (kubectl's built-in
+# kustomize); `kubectl kustomize k8s` shows what it renders.
+#
+# Nothing instance-specific lives here. The app's env (credentials and
+# settings) comes from the `remarkling-secrets` Secret, which the provider
+# (bugzoo-infrastructure) injects into the namespace.
+#
+# No Ingress: routing belongs to the deployer. deploy.sh adds the one in
+# k8s/ingress/ when DOMAIN is set; otherwise (e.g. tanka) bring your own,
+# pointing at Service `remarkling`, port `http`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: remarkling
+
+resources:
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+
+# deploy.sh pins the CI-built sha-<sha> tag in a temporary overlay.
+images:
+  - name: ghcr.io/derfred/remarkling
+    newTag: latest
