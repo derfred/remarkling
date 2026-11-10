@@ -71,12 +71,19 @@ namespace is deployed from here.
 
 - **CI** (`.github/workflows/ci.yml`) runs the tests, then builds and pushes
   `ghcr.io/derfred/remarkling:sha-<full sha>` on every push (`:latest` on `main`).
+- **Credentials** come from the `remarkling-secrets` Secret, which the provider injects into the
+  namespace; this repo never creates or reads it. Keys: `RM_DEVICE_TOKEN`, `ANTHROPIC_API_KEY`,
+  `API_TOKEN`, `MCP_TOKEN` and, with Trilium, `TRILIUM_ETAPI_TOKEN`. Pods don't start
+  (`CreateContainerConfigError`) until it exists. Env is read only at start, so after the
+  provider rotates it: `kubectl -n remarkling rollout restart deploy/remarkling`.
+- **Manifests** are a kustomization in `k8s/` (`kubectl kustomize k8s` shows the result). Plain
+  settings (hostname, Trilium URLs, poll interval, retention) are in its `configMapGenerator`; the
+  generated ConfigMap name carries a content hash, so changing a value rolls the pods.
 - **Deploy** with `scripts/deploy.sh [sha]` (default `HEAD`). It checks that CI built the image,
-  creates the `remarkling-secrets` Secret from `.env.production`, renders `k8s/*.yaml` and applies
-  them with `kubectl apply --server-side` (the `app` identity can write but not read Secrets).
+  pins `sha-<sha>` in a throwaway overlay and runs `kubectl apply -k --server-side` (the `app`
+  identity can write but not read Secrets), then waits for the rollout.
 
 ```sh
-cp .env.example .env.production          # fill in, never commit
 # kubeconfig for the `app` ServiceAccount: minted from bugzoo-infrastructure,
 # see environments/bugzoo/custom-apps/README.md ("Handing the app to its team")
 export KUBECONFIG=remarkling.kubeconfig  # or drop it in the repo root; it is gitignored

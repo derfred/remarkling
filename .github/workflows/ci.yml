@@ -29,6 +29,8 @@ jobs:
 
       - run: bash -n scripts/deploy.sh
 
+      - run: kubectl kustomize k8s > /dev/null
+
   build-and-push:
     needs: [test]
     if: github.event_name == 'push'

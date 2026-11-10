@@ -9,6 +9,11 @@
 # namespace but cannot READ Secrets. Everything is therefore applied with
 # `kubectl apply --server-side`, which only needs create/patch.
 #
+# Manifests and plain settings live in k8s/ as a kustomization; this script
+# only pins the image tag. Credentials are NOT deployed from here: the provider
+# injects the `remarkling-secrets` Secret into the namespace (see
+# k8s/deployment.yaml for the expected keys).
+#
 #   scripts/deploy.sh [git-sha]     # default: HEAD; CI must have built it
 #
 # Env: KUBECONFIG (default ~/.kube/config, or remarkling.kubeconfig in the
@@ -31,11 +36,6 @@ if [[ -z "${KUBECONFIG:-}" && -f "$PROJECT_DIR/remarkling.kubeconfig" ]]; then
 fi
 KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 export KUBECONFIG
-
-kapply() {
-  kubectl -n "$NAMESPACE" apply --server-side --force-conflicts \
-    --field-manager="$FIELD_MANAGER" -f "$@"
-}
 
 # Determine image tag: explicit arg, or full SHA of current HEAD. CI publishes
 # images tagged "sha-<full-sha>", so match that here.
@@ -90,99 +90,37 @@ verify_image() {
 
 verify_image
 
-# --- Load configuration from .env.production --------------------------------
-ENV_FILE="$PROJECT_DIR/.env.production"
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "ERROR: $ENV_FILE not found. Copy .env.example to .env.production and fill in production values." >&2
-  exit 1
-fi
-
-# Infrastructure values, rendered into the manifests.
-DOMAIN=""
-STORAGE_CLASS=""
-TRILIUM_URL=""
-TRILIUM_PUBLIC_URL=""
-POLL_INTERVAL_S="300"
-
-# Keys copied into the remarkling-secrets Secret (when non-empty).
-SECRET_KEYS=(RM_TRANSPORT RM_DEVICE_TOKEN RM_AUTH_HOST RM_SYNC_HOST RM_PAGE_WIDTH_UNITS
-             RM_INBOX RM_OUTBOX RM_ARCHIVE ANTHROPIC_API_KEY INTERPRET_MODEL
-             TRILIUM_ETAPI_TOKEN TRILIUM_PARENT_NOTE API_TOKEN MCP_TOKEN RETENTION_DAYS)
-declare -A SECRET_VALUES=()
-
-# Parsed manually (not sourced) so values with shell metacharacters survive.
-while IFS= read -r line || [[ -n "$line" ]]; do
-  [[ "$line" =~ ^[[:space:]]*# || -z "${line//[[:space:]]/}" ]] && continue
-  if [[ "$line" =~ ^([A-Z0-9_]+)=(.*)$ ]]; then
-    key="${BASH_REMATCH[1]}"
-    value="${BASH_REMATCH[2]}"
-    value="${value#\"}"; value="${value%\"}"
-    case "$key" in
-      DOMAIN)             DOMAIN="$value" ;;
-      STORAGE_CLASS)      STORAGE_CLASS="$value" ;;
-      TRILIUM_URL)        TRILIUM_URL="$value" ;;
-      TRILIUM_PUBLIC_URL) TRILIUM_PUBLIC_URL="$value" ;;
-      POLL_INTERVAL_S)    if [[ -n "$value" ]]; then POLL_INTERVAL_S="$value"; fi ;;
-      *)
-        for k in "${SECRET_KEYS[@]}"; do
-          if [[ "$k" == "$key" ]]; then SECRET_VALUES[$key]="$value"; fi
-        done ;;
-    esac
-  fi
-done < "$ENV_FILE"
-
-missing=()
-for var in DOMAIN STORAGE_CLASS; do
-  if [[ -z "${!var}" ]]; then missing+=("$var"); fi
-done
-for var in RM_DEVICE_TOKEN ANTHROPIC_API_KEY API_TOKEN MCP_TOKEN; do
-  if [[ -z "${SECRET_VALUES[$var]:-}" ]]; then missing+=("$var"); fi
-done
-if (( ${#missing[@]} )); then
-  echo "ERROR: not set in $ENV_FILE: ${missing[*]}" >&2
-  exit 1
-fi
-
-render() {
-  sed \
-    -e "s|__DOMAIN__|$DOMAIN|g" \
-    -e "s|__STORAGE_CLASS__|$STORAGE_CLASS|g" \
-    -e "s|__TRILIUM_URL__|$TRILIUM_URL|g" \
-    -e "s|__TRILIUM_PUBLIC_URL__|$TRILIUM_PUBLIC_URL|g" \
-    -e "s|__POLL_INTERVAL_S__|$POLL_INTERVAL_S|g" \
-    -e "s|__SECRETS_CHECKSUM__|${SECRETS_CHECKSUM:-}|g" \
-    "$1"
-}
-
-echo "==> Config: domain=$DOMAIN storage-class=$STORAGE_CLASS trilium=${TRILIUM_URL:-disabled}"
 echo "==> Deploying image: $FULL_IMAGE"
 
-# --- Application secret -------------------------------------------------------
-echo "==> Applying secret remarkling-secrets from .env.production"
-secret_args=()
-for key in "${SECRET_KEYS[@]}"; do
-  if [[ -n "${SECRET_VALUES[$key]:-}" ]]; then
-    secret_args+=("--from-literal=$key=${SECRET_VALUES[$key]}")
-  fi
-done
-SECRET_YAML="$(kubectl -n "$NAMESPACE" create secret generic remarkling-secrets \
-                 "${secret_args[@]}" --dry-run=client -o yaml)"
-SECRETS_CHECKSUM="$(sha256sum <<<"$SECRET_YAML" | cut -c1-16)"
-kapply - <<<"$SECRET_YAML"
+# A throwaway overlay on k8s/ that only sets the image tag, so the committed
+# kustomization stays untouched. It sits in the repo because kustomize only
+# accepts a relative path to its base.
+OVERLAY="$(mktemp -d "$PROJECT_DIR/.deploy-overlay.XXXXXX")"
+trap 'rm -rf "$OVERLAY"' EXIT
+cat > "$OVERLAY/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../k8s
+images:
+  - name: $IMAGE
+    newTag: sha-$TAG
+EOF
 
-# --- Application ------------------------------------------------------------
-echo "==> Applying volume, deployment, service, ingress"
-render "$K8S_DIR/pvc.yaml" | kapply -
-render "$K8S_DIR/deployment.yaml" \
-  | sed "s|image: ghcr.io/derfred/remarkling:latest.*|image: $FULL_IMAGE|" \
-  | kapply -
-kapply "$K8S_DIR/service.yaml"
-render "$K8S_DIR/ingress.yaml" | kapply -
+# Server-side apply only needs create/patch, which the `app` identity has even
+# for kinds it can't read.
+kubectl apply -k "$OVERLAY" --server-side --force-conflicts --field-manager="$FIELD_MANAGER"
 
 echo "==> Waiting for rollout to complete"
-kubectl -n "$NAMESPACE" rollout status deployment/remarkling --timeout=300s
+if ! kubectl -n "$NAMESPACE" rollout status deployment/remarkling --timeout=300s; then
+  echo "ERROR: rollout did not complete." >&2
+  echo "       If pods show CreateContainerConfigError, the provider has not injected" >&2
+  echo "       the remarkling-secrets Secret (or it lacks a key) — check with the provider." >&2
+  kubectl -n "$NAMESPACE" get pods >&2 || true
+  exit 1
+fi
 
 echo "==> Deployment complete!"
 echo "    Image:  $FULL_IMAGE"
-echo "    URL:    https://$DOMAIN"
+echo "    URL:    https://remarkling.derfred.com"
 kubectl -n "$NAMESPACE" get pods

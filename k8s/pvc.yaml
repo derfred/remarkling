@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/name: remarkling
 spec:
   accessModes: [ReadWriteOnce]
-  storageClassName: __STORAGE_CLASS__
+  storageClassName: longhorn  # immutable once created
   resources:
     requests:
       storage: 1Gi

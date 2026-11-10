@@ -1,6 +1,11 @@
-# Rendered by scripts/deploy.sh: __PLACEHOLDERS__ come from .env.production and
-# the image line is replaced with the CI-built sha tag. Secrets (tokens, API
-# keys) come from the remarkling-secrets Secret that deploy.sh creates.
+# Part of the kustomization in this directory (see kustomization.yaml).
+#
+# Credentials come from the `remarkling-secrets` Secret, which the platform
+# provider injects into the namespace (this repo never creates or reads it).
+# Expected keys: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY, API_TOKEN, MCP_TOKEN and,
+# with Trilium, TRILIUM_ETAPI_TOKEN. Plain settings come from the generated
+# `remarkling-config` ConfigMap. Env is read only at start: after the provider
+# rotates the Secret, `kubectl -n remarkling rollout restart deploy/remarkling`.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,10 +24,6 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: remarkling
-      annotations:
-        # Changes whenever the Secret's contents change, so a secret-only
-        # deploy still rolls the pod (envFrom is read only at start).
-        remarkling/secrets-checksum: "__SECRETS_CHECKSUM__"
     spec:
       # The `default` ServiceAccount carries the `registry` pull secret
       # (bugzoo-infrastructure custom-app stub).
@@ -35,21 +36,19 @@ spec:
           type: RuntimeDefault
       containers:
         - name: server
-          image: ghcr.io/derfred/remarkling:latest  # managed by CI — replaced with SHA on deploy
+          image: ghcr.io/derfred/remarkling  # tag set by kustomization.yaml / deploy.sh
           args: ["inkbridge", "serve", "--port", "8000"]
           securityContext: &containerSecurity
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
           envFrom: &envFrom
+            - configMapRef:
+                name: remarkling-config
             - secretRef:
-                name: remarkling-secrets
+                name: remarkling-secrets  # injected by the provider
           env: &env
             - {name: DATA_DIR, value: /data}
-            - {name: MCP_ALLOWED_HOSTS, value: "__DOMAIN__"}
-            - {name: TRILIUM_URL, value: "__TRILIUM_URL__"}
-            - {name: TRILIUM_PUBLIC_URL, value: "__TRILIUM_PUBLIC_URL__"}
-            - {name: POLL_INTERVAL_S, value: "__POLL_INTERVAL_S__"}
           ports:
             - {name: http, containerPort: 8000, protocol: TCP}
           readinessProbe:
@@ -67,7 +66,7 @@ spec:
             - {name: data, mountPath: /data}
             - {name: shm, mountPath: /dev/shm}
         - name: poller
-          image: ghcr.io/derfred/remarkling:latest  # managed by CI — replaced with SHA on deploy
+          image: ghcr.io/derfred/remarkling  # tag set by kustomization.yaml / deploy.sh
           args: ["python", "-m", "inkbridge.poller"]
           securityContext: *containerSecurity
           envFrom: *envFrom

@@ -14,10 +14,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - __DOMAIN__
+        - remarkling.derfred.com
       secretName: remarkling-tls
   rules:
-    - host: __DOMAIN__
+    - host: remarkling.derfred.com
       http:
         paths:
           - path: /
