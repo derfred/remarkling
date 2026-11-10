@@ -3,7 +3,7 @@ from starlette.testclient import TestClient
 
 from inkbridge import config
 from inkbridge.core import pipeline
-from inkbridge.core.store import Store
+from inkbridge.core.store import SQLiteStore
 from fakes import FakeInterpreter, MemoryTransport
 from rmfixtures import line, rm_page, sample_pdf
 
@@ -14,7 +14,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("MCP_TOKEN", "chat")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     config.get_settings.cache_clear()
-    bridge = pipeline.InkBridge(config.get_settings(), Store(":memory:"), MemoryTransport(), FakeInterpreter())
+    bridge = pipeline.InkBridge(config.get_settings(), SQLiteStore(":memory:"), MemoryTransport(), FakeInterpreter())
     monkeypatch.setattr(pipeline, "_bridge", bridge)
     from inkbridge.api import create_app
 

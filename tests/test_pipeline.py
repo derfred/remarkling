@@ -2,7 +2,7 @@ import pytest
 
 from inkbridge.config import Settings
 from inkbridge.core.pipeline import InkBridge
-from inkbridge.core.store import Store
+from inkbridge.core.store import SQLiteStore
 from fakes import FakeInterpreter, MemoryTransport
 from rmfixtures import line, rm_page, sample_pdf
 
@@ -10,7 +10,7 @@ from rmfixtures import line, rm_page, sample_pdf
 @pytest.fixture
 def bridge(tmp_path):
     settings = Settings(data_dir=tmp_path, anthropic_api_key="x", trilium_url="")
-    return InkBridge(settings, Store(":memory:"), MemoryTransport(), FakeInterpreter())
+    return InkBridge(settings, SQLiteStore(":memory:"), MemoryTransport(), FakeInterpreter())
 
 
 async def test_push_pdf_uploads_to_inbox(bridge):

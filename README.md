@@ -21,7 +21,7 @@ inkbridge/
     overlay.py     # rmscene -> annotated.pdf + 2x PNG, highlights, ink bands
     interpret.py   # 1,400 px strips, 15% overlap, inked strips only -> Claude -> merged feedback
     trilium.py     # ETAPI note per doc; re-pull updates in place
-    store.py       # SQLite
+    store.py       # doc state: SQLiteStore (default) or PostgresStore (DATABASE_URL)
     pipeline.py    # push_document(), poll_outbox()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
   api.py           # FastAPI /push /poll /healthz + MCP at /mcp, bearer-token auth
@@ -103,8 +103,13 @@ DOMAIN=remarkling.example.com scripts/deploy.sh
 
 One Deployment (`Recreate`), two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are
 serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered
-files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in SQLite. The public hostname
+files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store. The public hostname
 needs a DNS record pointing at the cluster's ingress.
+
+Document state (doc IDs, reMarkable UUIDs, status, Trilium links, feedback JSON) lives in SQLite at
+`DATA_DIR/inkbridge.sqlite3` unless `DATABASE_URL` is a `postgres://` URL, in which case the `docs`
+table is created there on start. The PVC is still needed either way: it holds the rendered and
+annotated files and the cross-container poll lock. Switching does not migrate existing rows.
 
 ## iPhone Shortcuts (M6)
 

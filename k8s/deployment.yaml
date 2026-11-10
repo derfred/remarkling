@@ -6,7 +6,8 @@
 #   required: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY, API_TOKEN, MCP_TOKEN,
 #             MCP_ALLOWED_HOSTS (the public hostname)
 #   Trilium:  TRILIUM_URL, TRILIUM_PUBLIC_URL, TRILIUM_PARENT_NOTE, TRILIUM_ETAPI_TOKEN
-#   optional: POLL_INTERVAL_S, RETENTION_DAYS, INTERPRET_MODEL, ...
+#   optional: POLL_INTERVAL_S, RETENTION_DAYS, INTERPRET_MODEL,
+#             DATABASE_URL (postgres://...; unset means SQLite on the PVC), ...
 # Env is read only at start: after the provider changes the Secret,
 # `kubectl -n remarkling rollout restart deploy/remarkling`.
 apiVersion: apps/v1
@@ -19,7 +20,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate  # RWO volume + SQLite: one pod at a time
+    type: Recreate  # RWO volume (files, poll lock, SQLite if no DATABASE_URL): one pod at a time
   selector:
     matchLabels:
       app.kubernetes.io/name: remarkling

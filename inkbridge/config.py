@@ -48,6 +48,8 @@ class Settings:
     )
     poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "300")))
     data_dir: Path = field(default_factory=lambda: Path(_env("DATA_DIR", "./data")))
+    # postgres://user:pass@host/db to keep document state in Postgres; empty means SQLite in DATA_DIR.
+    database_url: str = field(default_factory=lambda: _env("DATABASE_URL"))
     retention_days: int = field(default_factory=lambda: int(_env("RETENTION_DAYS", "30")))
 
     @property

@@ -17,7 +17,7 @@ from ..config import Settings, get_settings
 from . import render
 from .interpret import Interpreter, slice_strips
 from .overlay import overlay
-from .store import Doc, Store, now
+from .store import Doc, Store, now, open_store
 from .transport import RemoteDoc, Transport, make_transport
 from .trilium import Trilium
 
@@ -52,7 +52,7 @@ class InkBridge:
         trilium: Trilium | None = None,
     ):
         self.settings = settings or get_settings()
-        self.store = store or Store(self.settings.db_path)
+        self.store = store or open_store(self.settings)
         self._transport = transport
         self._interpreter = interpreter
         self._trilium = trilium
@@ -253,7 +253,7 @@ class InkBridge:
         return [d.feedback for d in docs], images
 
     def prune(self) -> int:
-        """Delete rendered files older than the retention window; feedback stays in SQLite."""
+        """Delete rendered files older than the retention window; feedback stays in the store."""
         cutoff = now() - self.settings.retention_days * 86400
         count = 0
         for d in self.store.older_than(cutoff):

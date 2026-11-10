@@ -1,7 +1,7 @@
 import pytest
 
 from inkbridge.core import pipeline
-from inkbridge.core.store import Store
+from inkbridge.core.store import SQLiteStore
 from inkbridge.config import Settings
 from inkbridge.mcp_server import mcp
 from fakes import FakeInterpreter, MemoryTransport
@@ -10,7 +10,7 @@ from rmfixtures import line, rm_page, sample_pdf
 
 @pytest.fixture
 def bridge(tmp_path, monkeypatch):
-    b = pipeline.InkBridge(Settings(data_dir=tmp_path), Store(":memory:"), MemoryTransport(), FakeInterpreter())
+    b = pipeline.InkBridge(Settings(data_dir=tmp_path), SQLiteStore(":memory:"), MemoryTransport(), FakeInterpreter())
     monkeypatch.setattr(pipeline, "_bridge", b)
     return b
 
