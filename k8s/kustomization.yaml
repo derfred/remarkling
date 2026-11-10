@@ -1,8 +1,13 @@
 # Applied by scripts/deploy.sh with `kubectl apply -k` (kubectl's built-in
 # kustomize); `kubectl kustomize k8s` shows what it renders.
 #
-# Credentials are not here: they come from the `remarkling-secrets` Secret,
-# which the provider (bugzoo-infrastructure) injects into the namespace.
+# Nothing instance-specific lives here. The app's env (credentials and
+# settings) comes from the `remarkling-secrets` Secret, which the provider
+# (bugzoo-infrastructure) injects into the namespace.
+#
+# No Ingress: routing belongs to the deployer. deploy.sh adds the one in
+# k8s/ingress/ when DOMAIN is set; otherwise (e.g. tanka) bring your own,
+# pointing at Service `remarkling`, port `http`.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: remarkling
@@ -11,21 +16,6 @@ resources:
   - pvc.yaml
   - deployment.yaml
   - service.yaml
-  - ingress.yaml
-
-# Plain settings. The generated name gets a hash of the contents
-# (remarkling-config-<hash>) and kustomize rewrites the Deployment's reference to
-# it, so changing a value here rolls the pods.
-configMapGenerator:
-  - name: remarkling-config
-    literals:
-      - MCP_ALLOWED_HOSTS=remarkling.derfred.com
-      - TRILIUM_URL=http://trilium.trilium.svc.cluster.local
-      - TRILIUM_PUBLIC_URL=https://trilium.derfred.com
-      # Note ID of the Trilium "reMarkable" parent note; Trilium stays off until set.
-      - TRILIUM_PARENT_NOTE=
-      - POLL_INTERVAL_S=300
-      - RETENTION_DAYS=30
 
 # deploy.sh pins the CI-built sha-<sha> tag in a temporary overlay.
 images:

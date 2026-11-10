@@ -9,14 +9,17 @@
 # namespace but cannot READ Secrets. Everything is therefore applied with
 # `kubectl apply --server-side`, which only needs create/patch.
 #
-# Manifests and plain settings live in k8s/ as a kustomization; this script
-# only pins the image tag. Credentials are NOT deployed from here: the provider
-# injects the `remarkling-secrets` Secret into the namespace (see
+# Manifests live in k8s/ as a kustomization; this script pins the image tag and,
+# if DOMAIN is set, adds the Ingress from k8s/ingress/ for that hostname. The
+# app's env (credentials and instance settings) is NOT deployed from here: the
+# provider injects the `remarkling-secrets` Secret into the namespace (see
 # k8s/deployment.yaml for the expected keys).
 #
-#   scripts/deploy.sh [git-sha]     # default: HEAD; CI must have built it
+#   [DOMAIN=remarkling.example.com] scripts/deploy.sh [git-sha]   # default: HEAD; CI must have built it
 #
-# Env: KUBECONFIG (default ~/.kube/config, or remarkling.kubeconfig in the
+# Env: DOMAIN (optional; public hostname, should match MCP_ALLOWED_HOSTS in the
+# Secret. Unset: no Ingress is applied because it is managed elsewhere, e.g. by
+# tanka; an Ingress applied by an earlier run is left in place), KUBECONFIG (default ~/.kube/config, or remarkling.kubeconfig in the
 # repo root if present), SKIP_IMAGE_CHECK=1 to deploy a tag CI didn't build.
 set -euo pipefail
 
@@ -30,6 +33,8 @@ GHCR_PACKAGE="remarkling"      # GHCR container package name (last path segment 
 GH_REPO="derfred/remarkling"   # GitHub repo whose CI builds the image
 NAMESPACE="remarkling"
 FIELD_MANAGER="remarkling-deploy"
+
+DOMAIN="${DOMAIN:-}"
 
 if [[ -z "${KUBECONFIG:-}" && -f "$PROJECT_DIR/remarkling.kubeconfig" ]]; then
   KUBECONFIG="$PROJECT_DIR/remarkling.kubeconfig"
@@ -91,8 +96,13 @@ verify_image() {
 verify_image
 
 echo "==> Deploying image: $FULL_IMAGE"
+if [[ -n "$DOMAIN" ]]; then
+  echo "    with Ingress for https://$DOMAIN"
+else
+  echo "    without Ingress (DOMAIN unset: managed elsewhere)"
+fi
 
-# A throwaway overlay on k8s/ that only sets the image tag, so the committed
+# A throwaway overlay on k8s/ that sets the image tag (and adds the Ingress), so the committed
 # kustomization stays untouched. It sits in the repo because kustomize only
 # accepts a relative path to its base.
 OVERLAY="$(mktemp -d "$PROJECT_DIR/.deploy-overlay.XXXXXX")"
@@ -100,12 +110,22 @@ trap 'rm -rf "$OVERLAY"' EXIT
 cat > "$OVERLAY/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-resources:
-  - ../k8s
 images:
   - name: $IMAGE
     newTag: sha-$TAG
+resources:
+  - ../k8s
 EOF
+if [[ -n "$DOMAIN" ]]; then
+  cat >> "$OVERLAY/kustomization.yaml" <<EOF
+  - ../k8s/ingress
+patches:
+  - target: {kind: Ingress, name: remarkling}
+    patch: |-
+      - {op: replace, path: /spec/tls/0/hosts/0, value: "$DOMAIN"}
+      - {op: replace, path: /spec/rules/0/host, value: "$DOMAIN"}
+EOF
+fi
 
 # Server-side apply only needs create/patch, which the `app` identity has even
 # for kinds it can't read.
@@ -122,5 +142,5 @@ fi
 
 echo "==> Deployment complete!"
 echo "    Image:  $FULL_IMAGE"
-echo "    URL:    https://remarkling.derfred.com"
+if [[ -n "$DOMAIN" ]]; then echo "    URL:    https://$DOMAIN"; fi
 kubectl -n "$NAMESPACE" get pods
