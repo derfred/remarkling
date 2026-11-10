@@ -24,6 +24,9 @@ log = logging.getLogger(__name__)
 
 DOC_TYPE = "80000000"
 FILE_TYPE = "0"
+# The cloud rejects new v3 root indexes; document indexes stay v3 (hash of the sorted entry hashes).
+ROOT_SCHEMA = "4"
+DOC_SCHEMA = "3"
 
 
 class CloudError(RuntimeError):
@@ -163,10 +166,11 @@ class CloudTransport:
             return r
         return r
 
-    async def get_blob(self, h: str) -> bytes:
-        r = await self._request("GET", f"/sync/v3/files/{h}")
+    async def get_blob(self, h: str, filename: str) -> bytes:
+        # The cloud answers 400 unless rm-filename names the blob (e.g. "root.docSchema", "<uuid>.metadata").
+        r = await self._request("GET", f"/sync/v3/files/{h}", headers={"rm-filename": filename})
         if r.status_code != 200:
-            raise CloudError(f"GET blob {h}: {r.status_code}")
+            raise CloudError(f"GET blob {filename} ({h}): {r.status_code} {r.text[:200]}")
         return r.content
 
     async def put_blob(self, data: bytes, filename: str, h: str | None = None) -> str:
@@ -192,10 +196,11 @@ class CloudTransport:
             raise CloudError(f"GET root: {r.status_code} {r.text[:200]}")
         info = r.json()
         root_hash, generation = info["hash"], int(info.get("generation", 0))
-        index = Index.parse(await self.get_blob(root_hash)) if root_hash else Index(str(info.get("schemaVersion", 3)), [])
+        index = Index.parse(await self.get_blob(root_hash, "root.docSchema")) if root_hash else Index(ROOT_SCHEMA, [])
         return root_hash, generation, index
 
     async def _put_root(self, index: Index, generation: int) -> bool:
+        index = Index(ROOT_SCHEMA, index.entries)  # upgrade a v3 root on first write
         data = index.serialize(".")
         h = await self.put_blob(data, "root.docSchema", index.hash(data))
         r = await self._request("PUT", "/sync/v3/root", json={"broadcast": True, "generation": generation, "hash": h})
@@ -211,9 +216,9 @@ class CloudTransport:
         cached = self._doc_cache.get(entry.hash)
         if cached:
             return cached
-        index = Index.parse(await self.get_blob(entry.hash))
+        index = Index.parse(await self.get_blob(entry.hash, f"{entry.id}.docSchema"))
         meta_entry = next((e for e in index.entries if e.id.endswith(".metadata")), None)
-        meta = json.loads(await self.get_blob(meta_entry.hash)) if meta_entry else {}
+        meta = json.loads(await self.get_blob(meta_entry.hash, meta_entry.id)) if meta_entry else {}
         self._doc_cache[entry.hash] = (index, meta)
         return index, meta
 
@@ -225,15 +230,16 @@ class CloudTransport:
                 _, meta = await self._doc(e)
                 return e, meta
 
-        results = await asyncio.gather(*(one(e) for e in root.entries if e.type == DOC_TYPE))
+        # Every root entry is a document or folder; v4 roots may type them "0" instead of DOC_TYPE.
+        results = await asyncio.gather(*(one(e) for e in root.entries))
         return [(e, m) for e, m in results if not m.get("deleted") and m.get("parent") != "trash"]
 
-    async def _upload_doc_files(self, doc_uuid: str, files: dict[str, bytes], schema: str) -> Entry:
+    async def _upload_doc_files(self, doc_uuid: str, files: dict[str, bytes]) -> Entry:
         entries = []
         for name, data in files.items():
             h = await self.put_blob(data, name)
             entries.append(Entry(h, FILE_TYPE, name, 0, len(data)))
-        index = Index(schema, entries)
+        index = Index(DOC_SCHEMA, entries)
         data = index.serialize(doc_uuid)
         h = await self.put_blob(data, f"{doc_uuid}.docSchema", index.hash(data))
         return Entry(h, DOC_TYPE, doc_uuid, len(entries), sum(e.size for e in entries))
@@ -267,7 +273,7 @@ class CloudTransport:
                 f"{folder_uuid}.metadata": json.dumps(document_metadata(name, "", "CollectionType")).encode(),
                 f"{folder_uuid}.content": b"{}",
             }
-            root.put(await self._upload_doc_files(folder_uuid, files, root.schema))
+            root.put(await self._upload_doc_files(folder_uuid, files))
 
         await self._commit(mutate)
         return folder_uuid
@@ -305,7 +311,7 @@ class CloudTransport:
         }
 
         async def mutate(root: Index):
-            root.put(await self._upload_doc_files(doc_uuid, files, root.schema))
+            root.put(await self._upload_doc_files(doc_uuid, files))
 
         await self._commit(mutate)
         return doc_uuid
@@ -316,7 +322,7 @@ class CloudTransport:
         if entry is None:
             raise CloudError(f"document {doc.uuid} not found")
         index, _ = await self._doc(entry)
-        blobs = await asyncio.gather(*(self.get_blob(e.hash) for e in index.entries))
+        blobs = await asyncio.gather(*(self.get_blob(e.hash, e.id) for e in index.entries))
         return RmDoc(uuid=doc.uuid, files={e.id: b for e, b in zip(index.entries, blobs)})
 
     async def move(self, doc: RemoteDoc, folder: str) -> None:

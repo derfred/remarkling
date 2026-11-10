@@ -61,6 +61,8 @@ class FakeCloud:
                 assert request.headers["x-goog-hash"].startswith("crc32c=")
                 self.blobs[h] = request.content
                 return httpx.Response(200)
+            if not request.headers.get("rm-filename"):
+                return httpx.Response(400, text="missing rm-filename")  # the real cloud rejects these too
             return httpx.Response(200, content=self.blobs[h]) if h in self.blobs else httpx.Response(404)
         return httpx.Response(404)
 
@@ -107,3 +109,36 @@ async def test_user_token_refreshes_on_401(cloud):
     t.client = httpx.AsyncClient(transport=httpx.MockTransport(flaky))
     await t.list_folder("Inbox")
     assert fake.user_token_calls == 2
+
+
+async def test_writes_v4_root_and_v3_doc_indexes():
+    fake = FakeCloud(schema="3")  # a legacy root is upgraded on the first write
+    t = CloudTransport("device", "https://auth.test", "https://sync.test",
+                       client=httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)))
+    u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+
+    root_data = fake.blobs[fake.root]
+    root = Index.parse(root_data)
+    assert root_data.splitlines()[:2] == [b"4", f"0:.:2:{sum(e.size for e in root.entries)}".encode()]
+    assert fake.root == sha256(root_data)
+
+    entry = Index.parse(root_data).get(u)
+    doc_data = fake.blobs[entry.hash]
+    doc_index = Index.parse(doc_data)
+    assert doc_data.splitlines()[0] == b"3"
+    assert entry.hash == doc_index.hash(doc_data)  # hash of the sorted file hashes
+    assert entry.hash != sha256(doc_data)
+
+
+async def test_lists_root_entries_typed_zero(cloud):
+    fake, t = cloud
+    u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    # Rewrite the root the way rmapi does for v4: entries typed "0" instead of "80000000".
+    root = Index.parse(fake.blobs[fake.root])
+    root.entries = [Entry(e.hash, "0", e.id, e.subfiles, e.size) for e in root.entries]
+    data = root.serialize(".")
+    fake.root = sha256(data)
+    fake.blobs[fake.root] = data
+    t._doc_cache.clear()
+
+    assert [d.uuid for d in await t.list_folder("Inbox")] == [u]
