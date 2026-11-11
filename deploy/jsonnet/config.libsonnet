@@ -42,7 +42,8 @@
 
   // Plain, non-secret settings, as env vars of both containers, e.g.
   // { TRILIUM_URL: 'http://trilium.trilium.svc.cluster.local' }. They win over
-  // keys of the same name in `secretName`.
+  // keys of the same name in `secretName`. Poller knobs: RM_NOTIFICATIONS_URL
+  // (cloud websocket; 'off' for timer polling), POLL_FALLBACK_S, POLL_INTERVAL_S.
   env: {},
 
   // Rendered documents, the poll lock, and SQLite when `database` is null.

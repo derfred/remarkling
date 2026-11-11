@@ -1,9 +1,19 @@
 import json
+from http import HTTPStatus
 
 import httpx
 import pytest
+from websockets.asyncio.server import serve
 
-from inkbridge.core.transport.cloud import CloudTransport, Entry, Index, crc32c, sha256
+from inkbridge.core.transport.cloud import (
+    CloudTransport,
+    Entry,
+    Index,
+    crc32c,
+    default_notifications_url,
+    parse_notification,
+    sha256,
+)
 from inkbridge.core.store import SQLiteStore
 from rmfixtures import sample_pdf
 
@@ -234,3 +244,49 @@ async def test_cache_failure_falls_back_to_the_cloud():
     t = _transport(fake, Broken())
     u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
     assert [d.uuid for d in await t.list_folder("Inbox")] == [u]
+
+
+def test_notifications_url_derived_from_sync_host():
+    t = CloudTransport("device", "https://auth.test", "https://sync.test/")
+    assert t.notifications_url == "wss://sync.test/notifications/ws/json/1"
+    assert t.notifications_enabled
+    assert not CloudTransport("device", "https://a", "https://s", notifications_url="off").notifications_enabled
+    assert default_notifications_url("http://localhost:3000") == "ws://localhost:3000/notifications/ws/json/1"
+
+
+def test_parse_notification():
+    raw = json.dumps({
+        "message": {
+            "attributes": {"event": "SyncComplete", "sourceDeviceID": "dev", "sourceDeviceDesc": "remarkable"},
+            "messageId": "1",
+            "publishTime": "2026-01-01T00:00:00Z",
+        },
+        "subscription": "sub",
+    })
+    assert parse_notification(raw)["event"] == "SyncComplete"
+    assert parse_notification("not json") == {}
+    assert parse_notification("[]") == {}
+
+
+async def test_notifications_websocket_refreshes_token_on_401(cloud):
+    fake, t = cloud
+    seen = []
+
+    def check_auth(connection, request):
+        seen.append(request.headers["Authorization"])
+        if request.headers["Authorization"] != "Bearer user-2":
+            return connection.respond(HTTPStatus.UNAUTHORIZED, "expired\n")
+        return None
+
+    async def handler(ws):
+        await ws.send(json.dumps({"message": {"attributes": {"event": "SyncComplete"}}}))
+        await ws.send("{}")
+
+    async with serve(handler, "127.0.0.1", 0, process_request=check_auth) as server:
+        port = server.sockets[0].getsockname()[1]
+        t.notifications_url = f"ws://127.0.0.1:{port}/notifications/ws/json/1"
+        async with t.notifications() as events:
+            got = [e async for e in events]
+
+    assert seen == ["Bearer user-1", "Bearer user-2"]
+    assert got == [{"event": "SyncComplete"}, {}]
