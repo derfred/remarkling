@@ -43,6 +43,11 @@ class Settings:
     # Service
     api_token: str = field(default_factory=lambda: _env("API_TOKEN"))
     mcp_token: str = field(default_factory=lambda: _env("MCP_TOKEN"))
+    # Header an auth proxy in front of the app (e.g. oauth2-proxy: X-Auth-Request-Email) sets on
+    # requests it has authenticated. A non-empty value admits /api/ requests without API_TOKEN, so
+    # the web UI rides on the proxy's session. The proxy must overwrite it on every /api/ request.
+    # Empty: /api/ needs the bearer token.
+    api_auth_header: str = field(default_factory=lambda: _env("API_AUTH_HEADER").lower())
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
     )

@@ -31,7 +31,7 @@ UI_DIR = Path(__file__).parent / "web"
 
 
 def _is_public(path: str) -> bool:
-    """Served without a token. The UI's files hold no data; the app asks for the API token itself."""
+    """Served without a token. The UI's files hold no data; its /api/ calls carry the proxy's session."""
     return path in ("/healthz", "/", "/ui") or path.startswith("/ui/")
 
 
@@ -46,7 +46,10 @@ class UIFiles(StaticFiles):
 
 
 class TokenAuth:
-    """Bearer-token auth per route group. /mcp also accepts ?token= for connectors that cannot set headers."""
+    """Bearer-token auth per route group. /mcp also accepts ?token= for connectors that cannot set headers.
+
+    /api/ also admits requests an auth proxy vouched for through API_AUTH_HEADER (the web UI's session).
+    """
 
     def __init__(self, app: ASGIApp):
         self.app = app
@@ -58,6 +61,9 @@ class TokenAuth:
         is_mcp = scope["path"].startswith("/mcp")
         expected = settings.mcp_token if is_mcp else settings.api_token
         headers = dict(scope.get("headers") or [])
+        if (settings.api_auth_header and (scope["path"] + "/").startswith("/api/")
+                and headers.get(settings.api_auth_header.encode(), b"").strip()):
+            return await self.app(scope, receive, send)
         auth = headers.get(b"authorization", b"").decode()
         given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
         if not given and is_mcp:
