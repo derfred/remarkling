@@ -13,8 +13,10 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 
@@ -126,8 +128,52 @@ async def register_device(code: str, auth_host: str) -> str:
         return r.text.strip()
 
 
+# Index and metadata blobs: small, fetched on every listing, worth keeping on disk.
+# Payloads (.pdf, .rm, ...) are fetched once per document and the pipeline keeps its own copy.
+_CACHED_SUFFIXES = (".docSchema", ".metadata", ".content")
+
+
+class BlobCache:
+    """Blobs on disk, keyed by hash. A blob never changes once stored, so entries never go stale.
+
+    Writes are atomic (temp file + rename) because the server and the poller share the directory.
+    """
+
+    def __init__(self, path: Path | None):
+        self.path = path
+        if path is not None:
+            path.mkdir(parents=True, exist_ok=True)
+
+    def _file(self, h: str) -> Path | None:
+        if self.path is None or not h or not all(c in "0123456789abcdef" for c in h):
+            return None
+        return self.path / h
+
+    def get(self, h: str) -> bytes | None:
+        f = self._file(h)
+        try:
+            return f.read_bytes() if f else None
+        except FileNotFoundError:
+            return None
+
+    def put(self, h: str, data: bytes) -> None:
+        f = self._file(h)
+        if f is None or f.exists():
+            return
+        tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, f)
+
+
 class CloudTransport:
-    def __init__(self, device_token: str, auth_host: str, sync_host: str, client: httpx.AsyncClient | None = None):
+    def __init__(
+        self,
+        device_token: str,
+        auth_host: str,
+        sync_host: str,
+        client: httpx.AsyncClient | None = None,
+        cache_dir: Path | None = None,
+    ):
         if not device_token:
             raise CloudError("RM_DEVICE_TOKEN is not set; run `inkbridge register <code>` first")
         self.device_token = device_token
@@ -136,8 +182,12 @@ class CloudTransport:
         self.client = client or httpx.AsyncClient(timeout=60)
         self._user_token: str | None = None
         self._lock = asyncio.Lock()
-        # doc index hash -> (index, metadata); blobs are immutable so this never goes stale.
+        self.cache = BlobCache(cache_dir)
+        # doc index hash -> (index, metadata) for the entries of the last listed root.
         self._doc_cache: dict[str, tuple[Index, dict]] = {}
+        # (root hash, live entries with metadata): an unchanged root needs no blob fetches at all.
+        self._listing: tuple[str, list[tuple[Entry, dict]]] | None = None
+        self.blob_fetches = 0
 
     async def aclose(self) -> None:
         await self.client.aclose()
@@ -167,10 +217,16 @@ class CloudTransport:
         return r
 
     async def get_blob(self, h: str, filename: str) -> bytes:
+        cacheable = filename.endswith(_CACHED_SUFFIXES)
+        if cacheable and (data := self.cache.get(h)) is not None:
+            return data
+        self.blob_fetches += 1
         # The cloud answers 400 unless rm-filename names the blob (e.g. "root.docSchema", "<uuid>.metadata").
         r = await self._request("GET", f"/sync/v3/files/{h}", headers={"rm-filename": filename})
         if r.status_code != 200:
             raise CloudError(f"GET blob {filename} ({h}): {r.status_code} {r.text[:200]}")
+        if cacheable:
+            self.cache.put(h, r.content)
         return r.content
 
     async def put_blob(self, data: bytes, filename: str, h: str | None = None) -> str:
@@ -188,6 +244,8 @@ class CloudTransport:
         )
         if r.status_code not in (200, 201, 202, 204):
             raise CloudError(f"PUT blob {filename}: {r.status_code} {r.text[:200]}")
+        if filename.endswith(_CACHED_SUFFIXES):
+            self.cache.put(h, data)
         return h
 
     async def get_root(self) -> tuple[str, int, Index]:
@@ -222,7 +280,11 @@ class CloudTransport:
         self._doc_cache[entry.hash] = (index, meta)
         return index, meta
 
-    async def _all_docs(self, root: Index) -> list[tuple[Entry, dict]]:
+    async def _all_docs(self, root_hash: str, root: Index) -> list[tuple[Entry, dict]]:
+        if self._listing and self._listing[0] == root_hash:
+            log.debug("root %s unchanged, reusing listing", root_hash[:12])
+            return self._listing[1]
+        fetches = self.blob_fetches
         sem = asyncio.Semaphore(8)
 
         async def one(e: Entry):
@@ -232,7 +294,13 @@ class CloudTransport:
 
         # Every root entry is a document or folder; v4 roots may type them "0" instead of DOC_TYPE.
         results = await asyncio.gather(*(one(e) for e in root.entries))
-        return [(e, m) for e, m in results if not m.get("deleted") and m.get("parent") != "trash"]
+        # Keep only the current entries so the memo doesn't grow with every edit.
+        current = {e.hash for e in root.entries}
+        self._doc_cache = {h: v for h, v in self._doc_cache.items() if h in current}
+        docs = [(e, m) for e, m in results if not m.get("deleted") and m.get("parent") != "trash"]
+        self._listing = (root_hash, docs)
+        log.info("listed root %s: %d entries, %d blobs fetched", root_hash[:12], len(root.entries), self.blob_fetches - fetches)
+        return docs
 
     async def _upload_doc_files(self, doc_uuid: str, files: dict[str, bytes]) -> Entry:
         entries = []
@@ -262,8 +330,8 @@ class CloudTransport:
         return None
 
     async def ensure_folder(self, name: str) -> str:
-        _, _, root = await self.get_root()
-        found = await self._folder_uuid(name, await self._all_docs(root))
+        root_hash, _, root = await self.get_root()
+        found = await self._folder_uuid(name, await self._all_docs(root_hash, root))
         if found:
             return found
         folder_uuid = new_uuid()
@@ -279,8 +347,8 @@ class CloudTransport:
         return folder_uuid
 
     async def list_folder(self, name: str) -> list[RemoteDoc]:
-        _, _, root = await self.get_root()
-        docs = await self._all_docs(root)
+        root_hash, _, root = await self.get_root()
+        docs = await self._all_docs(root_hash, root)
         folder = await self._folder_uuid(name, docs)
         if folder is None:
             return []

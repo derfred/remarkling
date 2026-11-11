@@ -46,7 +46,8 @@ class Settings:
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
     )
-    poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "300")))
+    # An idle poll is one GET of the root pointer (listings and index blobs are cached), so poll often.
+    poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "60")))
     data_dir: Path = field(default_factory=lambda: Path(_env("DATA_DIR", "./data")))
     # postgres://user:pass@host/db to keep document state in Postgres; empty means SQLite in DATA_DIR.
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL"))

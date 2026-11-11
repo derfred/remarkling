@@ -46,6 +46,10 @@ uv run pytest
 Add or bump dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit `uv.lock`.
 
 Configuration is environment-only; see `inkbridge/config.py` and `.env.example`.
+The cloud transport caches index and metadata blobs under `$DATA_DIR/cloud-cache/` (blobs are
+immutable, so the cache never goes stale and is safe to delete) and reuses the last listing while the
+root hash is unchanged. An idle poll is a single `GET /sync/v4/root`; hence the 60 s default for
+`POLL_INTERVAL_S`.
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
