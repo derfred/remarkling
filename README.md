@@ -94,6 +94,17 @@ namespace is deployed from here.
   (the `app` identity can write but not read Secrets), then waits for the rollout. With `DOMAIN`
   set it also applies `k8s/ingress/` for that hostname (nginx, cert-manager `letsencrypt-prod`);
   without it, no Ingress is touched.
+- **Postgres** is provisioned by bugzoo-infrastructure as a CloudNativePG Cluster `postgres` in the
+  namespace (database and owner `remarkling`, Service `postgres-rw:5432`). Flux owns it, so don't
+  edit it from here; size changes go in bugzoo's `cluster.libsonnet`
+  (`remarkling: { postgres: { storageSize: '5Gi' } }`). CNPG generates the Secret `postgres-app`,
+  and `deploy.sh` wires its `uri` key into `DATABASE_URL` of both containers (overriding any
+  `DATABASE_URL` in `remarkling-secrets`). Before applying, it waits up to `DB_WAIT_S` (300) for the
+  Cluster to report Ready: the Secret only exists once CNPG has bootstrapped it. Override with
+  `DATABASE_SECRET` / `DATABASE_SECRET_KEY`; `DATABASE_SECRET=` (empty) deploys without it (SQLite,
+  or `DATABASE_URL` from `remarkling-secrets`). The instance is small (one instance, 2 Gi node-local,
+  no replica, **no backups yet**): draining its node is a short outage and losing the node loses the
+  data. Each process holds one connection.
 - **Other deployers** (e.g. tanka) can render the base `k8s/` as is (tanka-util's
   `kustomize.build`) and add their own Ingress to Service `remarkling`, port `http`. Set
   `MCP_ALLOWED_HOSTS` in the Secret to the hostname it serves.
@@ -102,7 +113,7 @@ namespace is deployed from here.
 # kubeconfig for the `app` ServiceAccount: minted from bugzoo-infrastructure,
 # see environments/bugzoo/custom-apps/README.md ("Handing the app to its team")
 export KUBECONFIG=remarkling.kubeconfig  # or drop it in the repo root; it is gitignored
-DOMAIN=remarkling.example.com scripts/deploy.sh
+DOMAIN=remarkling.example.com scripts/deploy.sh   # DATABASE_SECRET= to stay on SQLite
 ```
 
 One Deployment (`Recreate`), two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are

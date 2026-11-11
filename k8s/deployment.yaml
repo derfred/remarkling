@@ -9,6 +9,8 @@
 #   optional: POLL_INTERVAL_S, RETENTION_DAYS, INTERPRET_MODEL,
 #             DATABASE_URL (postgres://... or sqlite:////data/...; unset means
 #             SQLite at /data/inkbridge.sqlite3 on the PVC), ...
+# scripts/deploy.sh adds DATABASE_URL from the CNPG-generated `postgres-app`
+# Secret (key `uri`) in an overlay; set DATABASE_SECRET= to leave it out.
 # Env is read only at start: after the provider changes the Secret,
 # `kubectl -n remarkling rollout restart deploy/remarkling`.
 apiVersion: apps/v1

@@ -20,7 +20,14 @@
 # Env: DOMAIN (optional; public hostname, should match MCP_ALLOWED_HOSTS in the
 # Secret. Unset: no Ingress is applied because it is managed elsewhere, e.g. by
 # tanka; an Ingress applied by an earlier run is left in place), KUBECONFIG (default ~/.kube/config, or remarkling.kubeconfig in the
-# repo root if present), SKIP_IMAGE_CHECK=1 to deploy a tag CI didn't build.
+# repo root if present), SKIP_IMAGE_CHECK=1 to deploy a tag CI didn't build,
+# DATABASE_SECRET (Secret holding the postgres:// URL, wired into DATABASE_URL of
+# both containers; default "postgres-app", which CloudNativePG generates for the
+# `postgres` Cluster bugzoo provisions in the namespace. Set it to empty,
+# DATABASE_SECRET=, for no Postgres wiring: DATABASE_URL then comes from
+# remarkling-secrets if it has one, else SQLite on the PVC),
+# DATABASE_SECRET_KEY (the key in that Secret holding the URL; default "uri"),
+# DB_WAIT_S (how long to wait for the CNPG Cluster to be ready; default 300).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +42,13 @@ NAMESPACE="remarkling"
 FIELD_MANAGER="remarkling-deploy"
 
 DOMAIN="${DOMAIN:-}"
+# CloudNativePG Cluster provisioned by bugzoo-infrastructure (postgresClusterName in
+# lib/helpers/custom-app.libsonnet). Flux owns it: never edit it from here.
+PG_CLUSTER="postgres"
+# No colon: unset means the default, explicitly empty means "no Postgres wiring".
+DATABASE_SECRET="${DATABASE_SECRET-$PG_CLUSTER-app}"
+DATABASE_SECRET_KEY="${DATABASE_SECRET_KEY:-uri}"
+DB_WAIT_S="${DB_WAIT_S:-300}"
 
 if [[ -z "${KUBECONFIG:-}" && -f "$PROJECT_DIR/remarkling.kubeconfig" ]]; then
   KUBECONFIG="$PROJECT_DIR/remarkling.kubeconfig"
@@ -93,13 +107,54 @@ verify_image() {
   exit 1
 }
 
+# wait_for_database — when using the CNPG-generated Secret, wait for the Cluster
+# to report Ready. CNPG creates `postgres-app` only once it has bootstrapped the
+# cluster; without it the pods sit in CreateContainerConfigError. The `app`
+# identity can't read Secrets, but it can read the Cluster's status.
+wait_for_database() {
+  [[ "$DATABASE_SECRET" == "$PG_CLUSTER-app" ]] || return 0
+  echo "==> Waiting for Postgres cluster $PG_CLUSTER to be ready (up to ${DB_WAIT_S}s)"
+  local deadline=$((SECONDS + DB_WAIT_S)) out ready phase
+  while true; do
+    if ! out="$(kubectl -n "$NAMESPACE" get clusters.postgresql.cnpg.io "$PG_CLUSTER" \
+                  -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}|{.status.phase}' 2>&1)"; then
+      if grep -q NotFound <<<"$out"; then
+        echo "ERROR: CNPG Cluster $PG_CLUSTER does not exist in namespace $NAMESPACE." >&2
+        echo "       It is provisioned by bugzoo-infrastructure; to deploy on SQLite" >&2
+        echo "       instead, re-run with DATABASE_SECRET= (empty)." >&2
+        exit 1
+      fi
+      echo "WARNING: could not read the Cluster status ($out); continuing." >&2
+      return 0
+    fi
+    ready="${out%%|*}"; phase="${out#*|}"
+    if [[ "$ready" == "True" ]]; then
+      echo "    - ready ($phase)"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "ERROR: Postgres cluster $PG_CLUSTER is not ready after ${DB_WAIT_S}s (phase: ${phase:-unknown})." >&2
+      echo "       Check: kubectl -n $NAMESPACE get clusters.postgresql.cnpg.io $PG_CLUSTER" >&2
+      exit 1
+    fi
+    echo "    - not ready yet (phase: ${phase:-unknown})"
+    sleep 10
+  done
+}
+
 verify_image
+wait_for_database
 
 echo "==> Deploying image: $FULL_IMAGE"
 if [[ -n "$DOMAIN" ]]; then
   echo "    with Ingress for https://$DOMAIN"
 else
   echo "    without Ingress (DOMAIN unset: managed elsewhere)"
+fi
+if [[ -n "$DATABASE_SECRET" ]]; then
+  echo "    with DATABASE_URL from Secret $DATABASE_SECRET (key $DATABASE_SECRET_KEY)"
+else
+  echo "    without Postgres wiring (DATABASE_SECRET empty: remarkling-secrets or SQLite)"
 fi
 
 # A throwaway overlay on k8s/ that sets the image tag (and adds the Ingress), so the committed
@@ -117,13 +172,29 @@ resources:
   - ../k8s
 EOF
 if [[ -n "$DOMAIN" ]]; then
+  echo "  - ../k8s/ingress" >> "$OVERLAY/kustomization.yaml"
+fi
+if [[ -n "$DOMAIN" || -n "$DATABASE_SECRET" ]]; then
+  echo "patches:" >> "$OVERLAY/kustomization.yaml"
+fi
+if [[ -n "$DOMAIN" ]]; then
   cat >> "$OVERLAY/kustomization.yaml" <<EOF
-  - ../k8s/ingress
-patches:
   - target: {kind: Ingress, name: remarkling}
     patch: |-
       - {op: replace, path: /spec/tls/0/hosts/0, value: "$DOMAIN"}
       - {op: replace, path: /spec/rules/0/host, value: "$DOMAIN"}
+EOF
+fi
+if [[ -n "$DATABASE_SECRET" ]]; then
+  # Appended to `env`, which wins over `envFrom`, so it overrides any DATABASE_URL in
+  # remarkling-secrets. Deliberately not `optional`: a missing Secret or key stops
+  # the pods (CreateContainerConfigError) instead of silently falling back to SQLite.
+  db_env="{name: DATABASE_URL, valueFrom: {secretKeyRef: {name: \"$DATABASE_SECRET\", key: \"$DATABASE_SECRET_KEY\"}}}"
+  cat >> "$OVERLAY/kustomization.yaml" <<EOF
+  - target: {kind: Deployment, name: remarkling}
+    patch: |-
+      - {op: add, path: /spec/template/spec/containers/0/env/-, value: $db_env}
+      - {op: add, path: /spec/template/spec/containers/1/env/-, value: $db_env}
 EOF
 fi
 
@@ -136,6 +207,10 @@ if ! kubectl -n "$NAMESPACE" rollout status deployment/remarkling --timeout=300s
   echo "ERROR: rollout did not complete." >&2
   echo "       If pods show CreateContainerConfigError, the provider has not injected" >&2
   echo "       the remarkling-secrets Secret (or it lacks a key) — check with the provider." >&2
+  if [[ -n "$DATABASE_SECRET" ]]; then
+    echo "       Also check that Secret $DATABASE_SECRET exists with key $DATABASE_SECRET_KEY" >&2
+    echo "       (or deploy on SQLite with DATABASE_SECRET= )." >&2
+  fi
   kubectl -n "$NAMESPACE" get pods >&2 || true
   exit 1
 fi
@@ -143,4 +218,5 @@ fi
 echo "==> Deployment complete!"
 echo "    Image:  $FULL_IMAGE"
 if [[ -n "$DOMAIN" ]]; then echo "    URL:    https://$DOMAIN"; fi
+if [[ -n "$DATABASE_SECRET" ]]; then echo "    DB:     Postgres, URL from Secret $DATABASE_SECRET"; fi
 kubectl -n "$NAMESPACE" get pods
