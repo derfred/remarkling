@@ -6,5 +6,4 @@ data/
 *.sqlite3
 .env.production
 *.kubeconfig
-.deploy-overlay.*/
 .env

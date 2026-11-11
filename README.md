@@ -28,7 +28,7 @@ inkbridge/
   poller.py        # poll_outbox() every POLL_INTERVAL_S
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
 prompts/interpret.md
-k8s/               # deployment (server + poller), pvc, service; ingress/ optional; applied by scripts/deploy.sh
+deploy/jsonnet/    # Kubernetes objects as a jsonnet library; VERSION = the release version
 ```
 
 ## Local setup
@@ -70,51 +70,50 @@ These are assumptions the code makes that only the real tablet and cloud can con
 ## Deploy (M5)
 
 Runs on the bugzoo cluster as a **custom app** of
-[bugzoo-infrastructure](https://github.com/derfred/bugzoo-infrastructure): that repo owns the
-`remarkling` namespace, the `registry` image pull secret and the `app` ServiceAccount
-(`customApps.apps.remarkling` in `environments/bugzoo/cluster.libsonnet`). Everything inside the
-namespace is deployed from here.
+[bugzoo-infrastructure](https://github.com/derfred/bugzoo-infrastructure). Production is deployed
+**only from that repo**, by Flux: this repo publishes releases, and a release goes live when its
+deploy PR in bugzoo-infrastructure is merged.
 
-- **CI** (`.github/workflows/ci.yml`) runs the tests, then builds and pushes
-  `ghcr.io/derfred/remarkling:sha-<full sha>` on every push (`:latest` on `main`).
-- **Configuration** comes entirely from the `remarkling-secrets` Secret, which the provider injects
-  into the namespace; this repo never creates or reads it, and holds no instance-specific values.
-  Every key becomes an env var (`inkbridge/config.py`). Required: `RM_DEVICE_TOKEN`,
-  `ANTHROPIC_API_KEY`, `API_TOKEN`, `MCP_TOKEN`, `MCP_ALLOWED_HOSTS` (the public hostname). For
-  Trilium: `TRILIUM_URL` (in-cluster, e.g. `http://trilium.trilium.svc.cluster.local`),
-  `TRILIUM_PUBLIC_URL`, `TRILIUM_PARENT_NOTE`, `TRILIUM_ETAPI_TOKEN`. Anything else in
-  `config.py` (`POLL_INTERVAL_S`, `RETENTION_DAYS`, ...) is optional. Pods don't start
-  (`CreateContainerConfigError`) until the Secret exists. Env is read only at start, so after the
-  provider changes it: `kubectl -n remarkling rollout restart deploy/remarkling`.
-- **Manifests** are a kustomization in `k8s/` (`kubectl kustomize k8s` shows the result): PVC,
-  Deployment, Service. It has no Ingress; `k8s/ingress/` holds an optional one with a placeholder
-  hostname.
-- **Deploy** with `[DOMAIN=<host>] scripts/deploy.sh [sha]` (default `HEAD`). It checks that CI
-  built the image, pins `sha-<sha>` in a throwaway overlay and runs `kubectl apply -k --server-side`
-  (the `app` identity can write but not read Secrets), then waits for the rollout. With `DOMAIN`
-  set it also applies `k8s/ingress/` for that hostname (nginx, cert-manager `letsencrypt-prod`);
-  without it, no Ingress is touched.
-- **Postgres** is provisioned by bugzoo-infrastructure as a CloudNativePG Cluster `postgres` in the
-  namespace (database and owner `remarkling`, Service `postgres-rw:5432`). Flux owns it, so don't
-  edit it from here; size changes go in bugzoo's `cluster.libsonnet`
-  (`remarkling: { postgres: { storageSize: '5Gi' } }`). CNPG generates the Secret `postgres-app`,
-  and `deploy.sh` wires its `uri` key into `DATABASE_URL` of both containers (overriding any
-  `DATABASE_URL` in `remarkling-secrets`). Before applying, it waits up to `DB_WAIT_S` (300) for the
-  Cluster to report Ready: the Secret only exists once CNPG has bootstrapped it. Override with
-  `DATABASE_SECRET` / `DATABASE_SECRET_KEY`; `DATABASE_SECRET=` (empty) deploys without it (SQLite,
-  or `DATABASE_URL` from `remarkling-secrets`). The instance is small (one instance, 2 Gi node-local,
-  no replica, **no backups yet**): draining its node is a short outage and losing the node loses the
-  data. Each process holds one connection.
-- **Other deployers** (e.g. tanka) can render the base `k8s/` as is (tanka-util's
-  `kustomize.build`) and add their own Ingress to Service `remarkling`, port `http`. Set
-  `MCP_ALLOWED_HOSTS` in the Secret to the hostname it serves.
-
-```sh
-# kubeconfig for the `app` ServiceAccount: minted from bugzoo-infrastructure,
-# see environments/bugzoo/custom-apps/README.md ("Handing the app to its team")
-export KUBECONFIG=remarkling.kubeconfig  # or drop it in the repo root; it is gitignored
-DOMAIN=remarkling.example.com scripts/deploy.sh   # DATABASE_SECRET= to stay on SQLite
 ```
+this repo                                   bugzoo-infrastructure                  cluster
+Release workflow ("Run workflow", or        app-update opens PR
+scripts/release.sh)                         "remarkling v0.2.0": the pin of
+  VERSION 0.2.0, tag v0.2.0           ───►  deploy/jsonnet@v0.2.0 + its render
+  image ghcr.io/derfred/remarkling:0.2.0    in deploy/remarkling/
+                                              │ merge (also from GitHub Mobile)
+                                              ▼
+                                            main  ◄── Flux applies it within a minute
+```
+
+- **Manifests** are the jsonnet library in `deploy/jsonnet/`: `objects(config { host: ... })`
+  returns the Deployment, Service, PVC and Ingress. Settings and their defaults are in
+  `deploy/jsonnet/config.libsonnet`. bugzoo-infrastructure vendors it at a release tag
+  (jsonnet-bundler) and sets the hostname, the Trilium URL and the auth in front of the Ingress.
+  The library renders no Namespace, no Secret and no RBAC: those belong to the platform.
+- **Versions.** `deploy/jsonnet/VERSION` is the release version. Release `vX.Y.Z` publishes image
+  `ghcr.io/derfred/remarkling:X.Y.Z`, and the library at that tag deploys exactly that image.
+  Release images are never overwritten. `pyproject.toml` keeps its own version.
+- **Releasing.** Run the **Release** workflow with a bump (`patch`/`minor`/`major`), from the
+  GitHub app or website, or run `scripts/release.sh [patch|minor|major]` on `main`. Either tests
+  the commit, publishes the image and a GitHub release, and pings bugzoo-infrastructure (with the
+  `INFRA_DISPATCH_TOKEN` secret; without it, that repo finds the release within the hour).
+- **CI** (`.github/workflows/ci.yml`) runs the tests and checks the library on every push, and
+  builds `sha-<full sha>` images for trying a commit out. Production never runs those.
+- **Configuration.** Credentials come from the `remarkling-secrets` Secret, which the platform
+  syncs from 1Password into the namespace; this repo never creates or reads it. Every key becomes
+  an env var (`inkbridge/config.py`): `RM_DEVICE_TOKEN`, `ANTHROPIC_API_KEY`, `API_TOKEN`,
+  `MCP_TOKEN`, `TRILIUM_ETAPI_TOKEN`, `TRILIUM_PARENT_NOTE`. Non-secret settings are plain env vars
+  set through the library's `env` (bugzoo sets `TRILIUM_URL` and `TRILIUM_PUBLIC_URL`).
+  `MCP_ALLOWED_HOSTS` defaults to the hostname. Env is read only at start, so after a credential
+  changes: `kubectl -n remarkling rollout restart deploy/remarkling`.
+- **Postgres** is provisioned by bugzoo-infrastructure as a CloudNativePG Cluster `postgres` in the
+  namespace (database and owner `remarkling`). CNPG generates the Secret `postgres-app`, whose `uri`
+  the library wires into `DATABASE_URL` of both containers (`database: null` for SQLite instead).
+  The instance is small (one instance, 2 Gi node-local, no replica, **no backups yet**): draining
+  its node is a short outage and losing the node loses the data. Each process holds one connection.
+- **Previews.** To try a commit on the cluster without releasing, render the library with your
+  own settings and the `sha-<sha>` image into a namespace of your own. The `remarkling` namespace
+  belongs to Flux, which reverts anything applied there by hand.
 
 One Deployment (`Recreate`), two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are
 serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered

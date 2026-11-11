@@ -1,9 +1,0 @@
-# Optional Ingress, applied by scripts/deploy.sh only when DOMAIN is set; it
-# replaces the placeholder hostname with $DOMAIN. Not part of the base in k8s/:
-# deployments that manage their own Ingress (e.g. tanka) leave it out.
-apiVersion: kustomize.config.k8s.io/v1beta1
-kind: Kustomization
-namespace: remarkling
-
-resources:
-  - ingress.yaml

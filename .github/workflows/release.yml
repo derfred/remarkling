@@ -1,0 +1,159 @@
+name: Release
+
+# Publishes release vX.Y.Z: image ghcr.io/derfred/remarkling:X.Y.Z, a GitHub
+# release, and a ping to bugzoo-infrastructure, whose app-update workflow then
+# opens the PR that deploys it. Merging that PR is the deploy.
+#
+# Two ways in:
+#   - "Run workflow" (also from GitHub Mobile) with a bump: commits the bumped
+#     deploy/jsonnet/VERSION to main, tags it, then releases that commit.
+#   - pushing a tag vX.Y.Z by hand (scripts/release.sh): releases the tagged
+#     commit, whose VERSION must already say X.Y.Z.
+#
+# deploy/jsonnet/VERSION is the release version: the jsonnet library at tag
+# vX.Y.Z deploys image X.Y.Z, so bugzoo-infrastructure pins one thing.
+# pyproject.toml keeps its own version (uv.lock records it).
+#
+# Optional secret INFRA_DISPATCH_TOKEN: fine-grained PAT, bugzoo-infrastructure
+# only, Contents: read and write (what repository_dispatch requires). Without
+# it, bugzoo-infrastructure still finds the release on its hourly poll.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: derfred/remarkling
+  VERSION_FILE: deploy/jsonnet/VERSION
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # A dispatch releases the tip of main, whichever branch it was run from.
+          ref: ${{ github.event_name == 'workflow_dispatch' && 'main' || github.ref }}
+          fetch-depth: 0
+
+      - name: Determine version
+        id: v
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          current=$(tr -d ' \n' < "$VERSION_FILE")
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            IFS=. read -r major minor patch <<<"$current"
+            case "$BUMP" in
+              major) version="$((major + 1)).0.0" ;;
+              minor) version="$major.$((minor + 1)).0" ;;
+              patch) version="$major.$minor.$((patch + 1))" ;;
+            esac
+            if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+              echo "::error::tag v$version already exists"; exit 1
+            fi
+            echo "$version" > "$VERSION_FILE"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Release v$version" -- "$VERSION_FILE"
+            git tag -a "v$version" -m "v$version"
+            # Pushed with GITHUB_TOKEN, so neither push starts another workflow
+            # run: this run releases the commit itself.
+            git push origin HEAD:main "v$version"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$current" ]; then
+              echo "::error::tag $GITHUB_REF_NAME, but $VERSION_FILE says $current"; exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version at $(git rev-parse HEAD)"
+
+  test:
+    needs: prepare
+    uses: ./.github/workflows/tests.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
+
+  publish:
+    needs: [prepare, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Release tags are immutable: the cluster pulls X.Y.Z with
+      # IfNotPresent, so a rebuilt X.Y.Z would never reach a node that has it.
+      - name: Refuse to overwrite a release image
+        run: |
+          if docker buildx imagetools inspect "$REGISTRY/$IMAGE_NAME:$VERSION" > /dev/null 2>&1; then
+            echo "::error::$REGISTRY/$IMAGE_NAME:$VERSION already exists"; exit 1
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ env.SHA }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SHA }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "v$VERSION" --verify-tag --generate-notes --title "v$VERSION"
+
+      - name: Ask bugzoo-infrastructure to propose the deploy
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "INFRA_DISPATCH_TOKEN not set; bugzoo-infrastructure picks v$VERSION up on its hourly poll."
+            exit 0
+          fi
+          gh api repos/derfred/bugzoo-infrastructure/dispatches \
+            -f event_type=app-release \
+            -f "client_payload[app]=remarkling" \
+            -f "client_payload[version]=v$VERSION"
+          echo "Dispatched app-release remarkling v$VERSION"

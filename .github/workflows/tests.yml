@@ -1,0 +1,47 @@
+name: Tests
+
+# Reusable: the test suite plus a render of deploy/jsonnet. Called by ci.yml on
+# every push and PR, and by release.yml for the commit it releases.
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to test (default: the triggering one)"
+        type: string
+        default: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      - run: uv run playwright install --with-deps chromium
+
+      - run: uv run pytest
+
+      # The library bugzoo-infrastructure vendors to deploy this app: it must
+      # be formatted, render, and carry a plain X.Y.Z VERSION (the image tag).
+      - name: Check deploy/jsonnet
+        env:
+          JSONNET_VERSION: v0.21.0
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/google/go-jsonnet/releases/download/${JSONNET_VERSION}/go-jsonnet_Linux_x86_64.tar.gz" |
+            tar xz -C "$RUNNER_TEMP" jsonnet jsonnetfmt
+          "$RUNNER_TEMP/jsonnetfmt" --test deploy/jsonnet/*.libsonnet
+          grep -qxE '[0-9]+\.[0-9]+\.[0-9]+' deploy/jsonnet/VERSION ||
+            { echo "::error::deploy/jsonnet/VERSION must be X.Y.Z"; exit 1; }
+          "$RUNNER_TEMP/jsonnet" -J deploy/jsonnet -e '
+            local r = import "main.libsonnet";
+            r.objects(r.config { host: "ci.example.com" })' > /dev/null
