@@ -1,0 +1,14 @@
+# SQLite database + rendered/returned documents. Pruned after RETENTION_DAYS.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: remarkling-data
+  namespace: remarkling
+  labels:
+    app.kubernetes.io/name: remarkling
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: longhorn  # immutable once created
+  resources:
+    requests:
+      storage: 1Gi
