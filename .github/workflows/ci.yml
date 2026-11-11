@@ -12,25 +12,10 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
+    uses: ./.github/workflows/tests.yml
 
-      - uses: astral-sh/setup-uv@v7
-        with:
-          python-version: "3.14"
-          enable-cache: true
-
-      - run: uv sync --locked
-
-      - run: uv run playwright install --with-deps chromium
-
-      - run: uv run pytest
-
-      - run: bash -n scripts/deploy.sh
-
-      - run: kubectl kustomize k8s > /dev/null
-
+  # sha-<full sha> on every push, for trying a commit out. Production only ever
+  # runs release images (X.Y.Z, built by release.yml).
   build-and-push:
     needs: [test]
     if: github.event_name == 'push'
