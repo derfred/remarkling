@@ -141,9 +141,11 @@ sit on it too so both containers see the same one. Switching does not migrate ex
 last cloud listing saw it (folders, documents, pages, which files are cached, Ink Bridge status),
 the raw cache entries by kind (root, index, metadata, content), and cache stats. The page itself
 is public and holds no data; it asks for `API_TOKEN` once and keeps it in the browser. It is
-read-only and never calls the cloud, so it is as fresh as the last poll or push.
+read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
+the cache with the current root, fetching any index, `.metadata` or `.content` blob it lacks (a poll
+skips `.content`, which holds page counts and file types). Blobs already cached cost no request.
 
-The same data is a REST API, all `GET`, with `Authorization: Bearer <API_TOKEN>`:
+The same data is a REST API with `Authorization: Bearer <API_TOKEN>`:
 
 | Route                           | Returns                                                         |
 | ------------------------------- | --------------------------------------------------------------- |
@@ -152,6 +154,7 @@ The same data is a REST API, all `GET`, with `Authorization: Bearer <API_TOKEN>`
 | `/api/cache/library/{uuid}`     | one node: breadcrumbs, metadata, content, its files and whether each is cached |
 | `/api/cache/blobs`              | cache entries; `kind`, `q` (key, file or document name), `limit`, `offset` |
 | `/api/cache/blobs/{key}`        | one entry decoded: parsed index, JSON or text                   |
+| `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched (501 on SSH) |
 
 ## Claude connector (M7)
 

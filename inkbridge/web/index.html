@@ -46,6 +46,18 @@ header {
   padding: calc(8px + env(safe-area-inset-top)) 16px 8px;
   border-bottom: 1px solid var(--line);
 }
+.head-inner { max-width: 728px; margin: 0 auto; }  /* main: 760 minus its 16px padding */
+.icon-btn:disabled { opacity: .6; }
+.icon-btn.busy svg { animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+#toast {
+  position: fixed; left: 16px; right: 16px; bottom: calc(72px + env(safe-area-inset-bottom)); z-index: 20;
+  max-width: 480px; margin: 0 auto; padding: 12px 16px; border-radius: 12px;
+  background: var(--text); color: var(--bg); font-size: 15px; text-align: center;
+  opacity: 0; transform: translateY(8px); transition: opacity .2s, transform .2s; pointer-events: none;
+}
+#toast.show { opacity: 1; transform: none; }
+#toast.error-toast { background: var(--danger); color: #fff; }
 .bar { display: flex; align-items: center; gap: 8px; min-height: 44px; }
 .bar h1 { flex: 1; font-size: 20px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-btn {
@@ -182,6 +194,7 @@ const ICONS = {
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
   blob: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>',
   chev: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>',
+  sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 18a5 5 0 0 1-.6-9.96A6 6 0 0 1 18 9a4.5 4.5 0 0 1-.5 8.97"/><path d="M12 12v8M9 17l3 3 3-3"/></svg>',
   logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>',
 };
 
@@ -226,8 +239,8 @@ const token = {
   clear() { try { localStorage.removeItem(TOKEN_KEY); } catch {} },
 };
 class AuthError extends Error {}
-async function api(path) {
-  const r = await fetch("/api/cache" + path, { headers: { Authorization: "Bearer " + token.get() } });
+async function api(path, method) {
+  const r = await fetch("/api/cache" + path, { method: method || "GET", headers: { Authorization: "Bearer " + token.get() } });
   if (r.status === 401) throw new AuthError("unauthorized");
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status + " " + r.statusText);
   return r.json();
@@ -238,15 +251,46 @@ async function library(force) {
   return libraryCache;
 }
 
+// --- sync ---------------------------------------------------------------------------------------
+let syncing = false;
+async function syncCache(e) {
+  if (syncing) return;
+  syncing = true;
+  const btn = e.currentTarget;
+  btn.classList.add("busy"); btn.disabled = true;
+  try {
+    const r = await api("/sync", "POST");
+    libraryCache = null;
+    toast(r.fetched ? `Synced: ${r.fetched} blob${r.fetched === 1 ? "" : "s"} fetched, ${r.documents} items` : `Up to date: ${r.documents} items`);
+    await route();
+  } catch (err) {
+    if (err instanceof AuthError) return fail(err);
+    toast("Sync failed: " + (err.message || err), true);
+  } finally {
+    syncing = false;
+    btn.classList.remove("busy"); btn.disabled = false;
+  }
+}
+let toastTimer;
+function toast(text, isError) {
+  let el = document.getElementById("toast");
+  if (!el) { el = h("div", { id: "toast", role: "status" }); document.body.append(el); }
+  el.textContent = text;
+  el.className = isError ? "show error-toast" : "show";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ""; }, isError ? 6000 : 3000);
+}
+
 // --- layout -------------------------------------------------------------------------------------
 const $header = document.getElementById("header"), $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
 function setHeader({ title, back, extra }) {
   const bar = h("div", { class: "bar" },
     back ? h("button", { class: "icon-btn", "aria-label": "Back", html: ICONS.back, onclick: () => history.length > 1 ? history.back() : go(back) }) : null,
     h("h1", {}, title),
-    h("button", { class: "icon-btn", "aria-label": "Refresh", html: ICONS.refresh, onclick: () => { libraryCache = null; route(); } }),
+    h("button", { class: "icon-btn", "aria-label": "Sync from reMarkable cloud", title: "Sync from reMarkable cloud", html: ICONS.sync, onclick: syncCache }),
+    h("button", { class: "icon-btn", "aria-label": "Reload", title: "Reload", html: ICONS.refresh, onclick: () => { libraryCache = null; route(); } }),
   );
-  $header.replaceChildren(bar, ...(extra || []));
+  $header.replaceChildren(h("div", { class: "head-inner" }, bar, ...(extra || []).filter(Boolean)));
 }
 function setTab(name) {
   $tabs.hidden = false;
@@ -317,7 +361,7 @@ async function viewLibrary(folder) {
     else list = items.filter(n => (n.parent || "") === (folder || "") && !(n.deleted && !folder));
     const out = [];
     if (!items.length) {
-      out.push(h("div", { class: "empty" }, "The cache holds no library yet.", h("br"), "It fills on the next cloud listing (a poll or a push)."));
+      out.push(h("div", { class: "empty" }, "The cache holds no library yet.", h("br"), "Tap the cloud button to sync it now."));
     } else if (!list.length) {
       out.push(h("div", { class: "empty" }, term ? "No matches." : "This folder is empty."));
     } else {

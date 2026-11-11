@@ -115,3 +115,34 @@ def test_api_routes(client):
     assert client.get("/api/cache/blobs/" + blobs["items"][0]["key"], headers=auth).json()["kind"] == "root"
     assert client.get("/api/cache/blobs/cloud.blob:none", headers=auth).status_code == 404
     assert client.get("/api/cache/blobs?kind=bogus", headers=auth).status_code == 422
+
+
+async def test_sync_fills_the_cache_including_content():
+    store = SQLiteStore(":memory:")
+    fake = FakeCloud()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+    writer = CloudTransport("device", "https://auth.test", "https://sync.test", client=client)  # no cache
+    await writer.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    await writer.upload_pdf(sample_pdf(), "Notes", "Inbox")
+
+    t = CloudTransport("device", "https://auth.test", "https://sync.test", client=client, cache=store)
+    await t.list_folder("Inbox")  # a listing caches indexes and metadata, not .content
+    assert CacheSnapshot(store).summary()["by_kind"]["content"]["count"] == 0
+
+    r = await t.sync()
+    assert r["documents"] == 3 and r["entries"] == 3
+    assert r["fetched"] == 2  # folder "{}" and the PDFs' shared .content: one blob each
+    snap = CacheSnapshot(store)
+    assert snap.summary()["library"]["uncached"] == 0
+    assert {n["name"]: n["page_count"] for n in snap.library() if n["type"] == "document"} == {"Spec": 1, "Notes": 1}
+
+    store._execute("DELETE FROM cache WHERE key = ?", (CACHE_PREFIX + r["root"],))
+    again = await t.sync()  # the unchanged-root memo is bypassed, so a missing row is refetched
+    assert again["fetched"] == 1
+    assert (await t.sync())["fetched"] == 0
+    await client.aclose()
+
+
+def test_sync_needs_the_cloud_transport(client):
+    assert client.post("/api/cache/sync").status_code == 401
+    assert client.post("/api/cache/sync", headers={"Authorization": "Bearer phone"}).status_code == 501

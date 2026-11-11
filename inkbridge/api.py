@@ -123,6 +123,13 @@ def create_app() -> ASGIApp:
     def cache_summary():
         return snapshot().summary()
 
+    @app.post("/api/cache/sync")
+    async def cache_sync():
+        sync = getattr(get_bridge().transport, "sync", None)
+        if sync is None:
+            raise HTTPException(501, "only the cloud transport keeps a cache")
+        return await sync()
+
     @app.get("/api/cache/library")
     def cache_library():
         return {"items": snapshot().library()}
