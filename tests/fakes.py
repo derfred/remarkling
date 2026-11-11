@@ -33,7 +33,15 @@ class MemoryTransport:
         return u
 
     async def download(self, remote):
+        if remote.uuid not in self.docs:
+            raise FileNotFoundError(remote.uuid)
         return self.docs[remote.uuid][1]
+
+    async def download_file(self, doc_uuid, name):
+        try:
+            return self.docs[doc_uuid][1].files[name]
+        except KeyError:
+            raise FileNotFoundError(name) from None
 
     async def move(self, remote, folder):
         r, doc = self.docs[remote.uuid]

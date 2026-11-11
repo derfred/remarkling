@@ -99,7 +99,14 @@ class Transport(Protocol):
     async def upload_pdf(self, pdf: bytes, visible_name: str, folder: str) -> str:
         """Upload a PDF into a top-level folder; return the new document UUID."""
 
-    async def download(self, doc: RemoteDoc) -> RmDoc: ...
+    async def download(self, doc: RemoteDoc) -> RmDoc:
+        """The whole document. Raises FileNotFoundError when it does not exist."""
+
+    async def download_file(self, doc_uuid: str, name: str) -> bytes:
+        """One file of a document, by its name in the .rmdoc ("<uuid>.pdf", "<uuid>/<page>.rm").
+
+        Raises FileNotFoundError when the document or the file does not exist.
+        """
 
     async def move(self, doc: RemoteDoc, folder: str) -> None: ...
 
@@ -109,6 +116,12 @@ class Transport(Protocol):
     #     def notifications(self) -> AbstractAsyncContextManager[AsyncIterator[dict]]
     # entered once connected, yielding one dict per remote change and ending when the connection
     # drops. The poller wakes on them; without it, it polls on a timer.
+
+
+def check_file_name(doc_uuid: str, name: str) -> None:
+    """A document's files are "<uuid>.<ext>" or live under "<uuid>/"; anything else is refused."""
+    if not (name.startswith(doc_uuid + ".") or name.startswith(doc_uuid + "/")) or ".." in name.split("/"):
+        raise FileNotFoundError(f"{name} is not a file of document {doc_uuid}")
 
 
 def new_uuid() -> str:

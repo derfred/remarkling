@@ -15,6 +15,7 @@ from inkbridge.core.transport.cloud import (
     sha256,
 )
 from inkbridge.core.store import SQLiteStore
+from inkbridge.core.transport.base import RemoteDoc
 from rmfixtures import sample_pdf
 
 
@@ -290,3 +291,18 @@ async def test_notifications_websocket_refreshes_token_on_401(cloud):
 
     assert seen == ["Bearer user-1", "Bearer user-2"]
     assert got == [{"event": "SyncComplete"}, {}]
+
+
+async def test_download_file(cloud):
+    fake, t = cloud
+    pdf = sample_pdf()
+    u = await t.upload_pdf(pdf, "Spec", "Inbox")
+    assert await t.download_file(u, f"{u}.pdf") == pdf
+    assert json.loads(await t.download_file(u, f"{u}.metadata"))["visibleName"] == "Spec"
+    for name in (f"{u}.epub", f"{u}/../x.pdf", "other.pdf"):
+        with pytest.raises(FileNotFoundError):
+            await t.download_file(u, name)
+    with pytest.raises(FileNotFoundError):
+        await t.download_file("missing", "missing.pdf")
+    with pytest.raises(FileNotFoundError):
+        await t.download(RemoteDoc("missing", "", ""))

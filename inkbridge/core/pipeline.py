@@ -158,12 +158,15 @@ class InkBridge:
             return None
 
         rmdoc = await self.transport.download(remote)
-        original = rmdoc.pdf
-        if original is None:
-            log.warning("skipping %s: not a PDF document", remote.name)
-            return None
+        ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units)
+        # Notebooks (and EPUBs) have no PDF: their "original" is the rendering without ink,
+        # i.e. the template and any typed text.
+        original = rmdoc.pdf or ov.text_pdf
+        if rmdoc.pdf is None:
+            log.info("%s has no PDF (%s); using its rendered pages", remote.name,
+                     rmdoc.content.get("fileType") or "notebook")
 
-        doc_id = render.read_id(original) or render.id_from_title(remote.name)
+        doc_id = (render.read_id(rmdoc.pdf) if rmdoc.pdf else None) or render.id_from_title(remote.name)
         doc = self.store.get(doc_id) if doc_id else None
         if doc is None:
             doc = known or Doc(
@@ -177,7 +180,6 @@ class InkBridge:
         title = remote.name if external else doc.title
 
         d = self.doc_dir(doc.doc_id)
-        ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units)
         render.write(d / "original.pdf", original)
         render.write(d / "annotated.pdf", ov.annotated_pdf)
         render.write(d / "annotated.png", ov.png)

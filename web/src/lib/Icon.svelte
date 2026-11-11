@@ -11,6 +11,7 @@
     blob: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/>',
     blobs: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
     stats: '<path d="M5 20V10M12 20V4M19 20v-7"/>',
+    download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
     chev: '<path d="M9 6l6 6-6 6" stroke-width="2"/>',
   };
   let { name, class: cls = "size-5" } = $props();

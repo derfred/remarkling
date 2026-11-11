@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import json
+import mimetypes
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePath
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings
 from .core.explorer import KINDS, CacheSnapshot
 from .core.pipeline import get_bridge
+from .core.renderer import PageNotFound, Renderer
+from .core.transport.base import RemoteDoc
 from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
@@ -64,6 +70,63 @@ class TokenAuth:
         else:
             return await self.app(scope, receive, send)
         await response(scope, receive, send)
+
+
+# Types browsers know but mimetypes may not; everything else is application/octet-stream.
+FILE_TYPES = {".pdf": "application/pdf", ".epub": "application/epub+zip", ".json": "application/json",
+              ".metadata": "application/json", ".content": "application/json", ".pagedata": "text/plain",
+              ".rmdoc": "application/zip", ".rm": "application/octet-stream"}  # not RealMedia
+
+
+def download_name(visible_name: str, doc_uuid: str, name: str) -> str:
+    """Name a file after its document: <uuid>.pdf -> Spec.pdf, <uuid>/<page>.rm -> Spec <page>.rm."""
+    rest = name.removeprefix(doc_uuid)
+    if rest.startswith("/"):
+        rest = " " + rest[1:].replace("/", " ")
+    base = "".join(c for c in visible_name if c not in '/\\:*?"<>|' and c >= " ").strip() or doc_uuid
+    return base + rest
+
+
+def file_response(data: bytes, filename: str, inline: bool = False, cache: str = "private, no-store") -> Response:
+    suffix = PurePath(filename).suffix.lower()
+    ctype = FILE_TYPES.get(suffix) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    # filename= for old clients (ASCII only), filename*= (RFC 6266) for the real name.
+    ascii_name = filename.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
+    disposition = (f"{'inline' if inline else 'attachment'}; filename=\"{ascii_name}\"; "
+                   f"filename*=UTF-8''{quote(filename, safe='')}")
+    return Response(data, media_type=ctype, headers={"Content-Disposition": disposition, "Cache-Control": cache})
+
+
+class RenderCache:
+    """Renderers of recently viewed documents, so a page of previews downloads the document once.
+
+    Entries live `ttl` seconds: previews may lag the tablet by that much. Full downloads bypass it.
+    """
+
+    def __init__(self, ttl: float = 120, size: int = 4):
+        self.ttl, self.size = ttl, size
+        self._items: dict[str, tuple[float, Renderer]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def get(self, uuid: str, fresh: bool = False) -> Renderer:
+        lock = self._locks.setdefault(uuid, asyncio.Lock())
+        async with lock:  # concurrent previews of one document share one download
+            hit = self._items.get(uuid)
+            if hit and not fresh and hit[0] > time.monotonic():
+                return hit[1]
+            try:
+                rmdoc = await get_bridge().transport.download(RemoteDoc(uuid, "", ""))
+            except FileNotFoundError as e:
+                raise HTTPException(404, "no such document") from e
+            rm_width = get_settings().rm_page_width_units
+            renderer = await asyncio.to_thread(Renderer, rmdoc, rm_width)
+            self._items.pop(uuid, None)
+            self._items[uuid] = (time.monotonic() + self.ttl, renderer)
+            while len(self._items) > self.size:
+                oldest = next(iter(self._items))
+                del self._items[oldest]
+                self._locks.pop(oldest, None)
+            return renderer
 
 
 def _mcp_app():
@@ -171,6 +234,67 @@ def create_app() -> ASGIApp:
         if detail is None:
             raise HTTPException(404, "no such cache entry")
         return detail
+
+    # --- downloads: a document's files, fetched from the tablet (cloud or SSH), not the cache -----
+
+    async def visible_name(uuid: str) -> str:
+        node = snapshot().nodes.get(uuid)
+        if node is not None and node.metadata is not None:
+            return node.name
+        try:
+            meta = json.loads(await get_bridge().transport.download_file(uuid, f"{uuid}.metadata"))
+            return meta.get("visibleName") or uuid
+        except (FileNotFoundError, ValueError):
+            return uuid
+
+    @app.get("/api/docs/{uuid}/rmdoc")
+    async def download_rmdoc(uuid: str):
+        """The whole document as an .rmdoc (zip): the original PDF/EPUB, metadata and page strokes."""
+        try:
+            rmdoc = await get_bridge().transport.download(RemoteDoc(uuid, "", ""))
+        except FileNotFoundError as e:
+            raise HTTPException(404, "no such document") from e
+        name = rmdoc.metadata.get("visibleName") or await visible_name(uuid)
+        return file_response(rmdoc.to_zip(), download_name(name, uuid, ".rmdoc"))
+
+    @app.get("/api/docs/{uuid}/files/{name:path}")
+    async def download_file(uuid: str, name: str):
+        """One file of a document, by its name in the doc index ("<uuid>.pdf", "<uuid>/<page>.rm")."""
+        try:
+            data = await get_bridge().transport.download_file(uuid, name)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        return file_response(data, download_name(await visible_name(uuid), uuid, name))
+
+    # --- rendering: pages as the tablet shows them, ink included (see core/renderer.py) ---------
+
+    renders = RenderCache()
+
+    def page_or_404(fn, *args):
+        try:
+            return fn(*args)
+        except PageNotFound as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.get("/api/docs/{uuid}/pages")
+    async def doc_pages(uuid: str):
+        """Every page in tablet order: number, page ID, the PDF page behind it, ink, size in points."""
+        return {"pages": [p.as_dict() for p in (await renders.get(uuid)).pages]}
+
+    @app.get("/api/docs/{uuid}/pages/{number}.png")
+    async def page_png(uuid: str, number: int, width: int | None = Query(None, ge=32, le=4000)):
+        renderer = await renders.get(uuid)
+        png = await asyncio.to_thread(page_or_404, renderer.png, number, width)
+        name = download_name(await visible_name(uuid), uuid, f" p{number}.png")
+        return file_response(png, name, inline=True, cache="private, max-age=60")
+
+    @app.get("/api/docs/{uuid}/render.pdf")
+    async def render_pdf(uuid: str):
+        """The whole document rendered with its ink, fetched fresh from the tablet."""
+        renderer = await renders.get(uuid, fresh=True)
+        pdf = await asyncio.to_thread(page_or_404, renderer.pdf)
+        name = renderer.doc.metadata.get("visibleName") or await visible_name(uuid)
+        return file_response(pdf, download_name(name, uuid, " (rendered).pdf"))
 
     @app.get("/", include_in_schema=False)
     @app.get("/ui", include_in_schema=False)
