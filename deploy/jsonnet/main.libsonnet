@@ -3,13 +3,16 @@
 //   local remarkling = import 'github.com/derfred/remarkling/deploy/jsonnet/main.libsonnet';
 //   remarkling.objects(remarkling.config { host: 'remarkling.example.com' })
 //
-// objects(cfg) returns a flat list: Deployment (server + poller), Service, PVC
-// and, unless cfg.ingress.enabled is false, an Ingress. See config.libsonnet
+// objects(cfg) returns a flat list: Deployment (server + poller), Service,
+// a PVC with cfg.storage.persistent, and an Ingress unless cfg.ingress.enabled
+// is false. See config.libsonnet
 // for every setting and for what the library leaves to the platform.
 {
   config:: import 'config.libsonnet',
 
   objects(cfg):: (
+    assert cfg.database != null || cfg.storage.persistent :
+           'remarkling: SQLite (database: null) needs storage.persistent: true, or the database dies with the pod';
     local labels = { 'app.kubernetes.io/name': cfg.name };
     local meta(name) = { name: name, namespace: cfg.namespace, labels: labels };
 
@@ -45,7 +48,9 @@
         metadata: meta(cfg.name) + { labels+: { 'app.kubernetes.io/version': cfg.version } },
         spec: {
           replicas: 1,
-          // ReadWriteOnce volume: one pod at a time.
+          // One pod at a time: the poll lock is per pod (a rolling update
+          // would briefly run two pollers), and a ReadWriteOnce claim, when
+          // persistent, mounts on one node only.
           strategy: { type: 'Recreate' },
           selector: { matchLabels: labels },
           template: {
@@ -76,7 +81,9 @@
                 container('poller', ['python', '-m', 'inkbridge.poller'], cfg.resources.poller),
               ],
               volumes: [
-                { name: 'data', persistentVolumeClaim: { claimName: cfg.storage.claimName } },
+                if cfg.storage.persistent
+                then { name: 'data', persistentVolumeClaim: { claimName: cfg.storage.claimName } }
+                else { name: 'data', emptyDir: { sizeLimit: cfg.storage.size } },
                 { name: 'shm', emptyDir: { medium: 'Memory', sizeLimit: '256Mi' } },
               ],
             },
@@ -93,17 +100,16 @@
           ports: [{ name: 'http', port: 80, targetPort: 'http', protocol: 'TCP' }],
         },
       },
-      {
-        apiVersion: 'v1',
-        kind: 'PersistentVolumeClaim',
-        metadata: meta(cfg.storage.claimName),
-        spec: {
-          accessModes: ['ReadWriteOnce'],
-          storageClassName: cfg.storage.storageClass,
-          resources: { requests: { storage: cfg.storage.size } },
-        },
-      },
     ]
+    + (if !cfg.storage.persistent then [] else [{
+         apiVersion: 'v1',
+         kind: 'PersistentVolumeClaim',
+         metadata: meta(cfg.storage.claimName),
+         spec: {
+           accessModes: ['ReadWriteOnce'],
+           resources: { requests: { storage: cfg.storage.size } },
+         } + (if cfg.storage.storageClass == null then {} else { storageClassName: cfg.storage.storageClass }),
+       }])
     + (if !cfg.ingress.enabled then [] else [{
          apiVersion: 'networking.k8s.io/v1',
          kind: 'Ingress',

@@ -107,7 +107,7 @@ library and moves the pin when a new release appears.
   })
   ```
 
-  That gives the Deployment, Service, PVC and Ingress (nginx and cert-manager by default). Every
+  That gives the Deployment, Service and Ingress (nginx and cert-manager by default). Every
   setting and its default is in `deploy/jsonnet/config.libsonnet`. The library renders no
   Namespace, no Secret and no RBAC: the deployment provides those.
 - **Credentials** come from the Secret named by `secretName` (default `remarkling-secrets`).
@@ -117,9 +117,13 @@ library and moves the pin when a new release appears.
   Env is read only at start, so restart the Deployment after a credential changes.
 - **Postgres.** By default `DATABASE_URL` comes from the Secret `postgres-app`, key `uri`: what
   CloudNativePG generates for a Cluster named `postgres`. Point `database` at another Secret, or
-  set it to `null` to use SQLite on the volume.
+  set it to `null` for SQLite, which also needs `storage: { persistent: true }`.
+- **Files** (`DATA_DIR`) are on an `emptyDir` by default: with Postgres, nothing there has to
+  outlive the pod. A restart drops the rendered files, so `get_annotations` then returns earlier
+  documents' feedback without their strip images. `storage: { persistent: true }` puts them on a
+  PersistentVolumeClaim instead.
 
-One Deployment (`Recreate`), two containers (`server`, `poller`) sharing a 1 Gi PVC. Polls are
+One Deployment (`Recreate`), two containers (`server`, `poller`) sharing the data volume. Polls are
 serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered
 files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store. The public hostname
 needs a DNS record pointing at the cluster's ingress.
@@ -136,9 +140,10 @@ database `DATABASE_URL` names; its tables are created on start:
 
 The same store also holds a `cache` table: the cloud transport keeps the root, document index,
 metadata and content blobs there, keyed by hash and pruned to what the current root references, so
-the server and poller share them and a restart does not refetch the whole library. The PVC is still needed either way: it
-holds the rendered and annotated files and the cross-container poll lock, and a SQLite file must
-sit on it too so both containers see the same one. Switching does not migrate existing rows.
+the server and poller share them and a restart does not refetch the whole library. The data volume
+holds the rendered and annotated files and the cross-container poll lock; a SQLite file must sit on
+it too, so both containers see the same one, and then the volume has to be persistent. Switching
+does not migrate existing rows.
 
 ## iPhone Shortcuts (M6)
 
