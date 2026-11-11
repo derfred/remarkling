@@ -4,11 +4,9 @@
   import Section from "../lib/Section.svelte";
   import KV from "../lib/KV.svelte";
   import KVRow from "../lib/KVRow.svelte";
-  import Button from "../lib/Button.svelte";
   import Await from "../lib/Await.svelte";
   import { api } from "../lib/api.js";
   import { enc } from "../lib/router.svelte.js";
-  import { logout } from "../lib/session.svelte.js";
   import { bytes, fullTime, short } from "../lib/format.js";
 
   const promise = api("");
@@ -80,7 +78,6 @@
         <KVRow label="Newest entry">{fullTime(s.newest)}</KVRow>
       </KV>
 
-      <Button onclick={() => logout()}>Forget API token</Button>
     {/snippet}
   </Await>
 </Page>

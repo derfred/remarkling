@@ -151,3 +151,19 @@ def test_page_previews_share_one_download(client):
     assert len(calls) == 1
     client.get(f"/api/docs/{u}/render.pdf", headers=auth)  # a download is always fresh
     assert len(calls) == 2
+
+
+def test_api_accepts_the_auth_proxy_header_when_configured(client, monkeypatch):
+    proxied = {"X-Auth-Request-Email": "me@example.com"}
+    assert client.get("/api/cache", headers=proxied).status_code == 401
+
+    monkeypatch.setenv("API_AUTH_HEADER", "X-Auth-Request-Email")
+    config.get_settings.cache_clear()
+    assert client.get("/api/cache", headers=proxied).status_code == 200
+    assert client.get("/api/cache/library", headers=proxied).status_code == 200
+    assert client.get("/api/docs/nope/pages", headers=proxied).status_code == 404  # past auth
+    assert client.get("/api/cache", headers={"X-Auth-Request-Email": " "}).status_code == 401
+    assert client.get("/api/cache", headers={"Authorization": "Bearer phone"}).status_code == 200
+    # Only /api/ rides on the proxy's session; the Shortcuts and MCP routes keep their tokens.
+    assert client.post("/poll", headers=proxied).status_code == 401
+    assert client.post("/mcp", headers=proxied).status_code == 401

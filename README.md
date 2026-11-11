@@ -163,7 +163,13 @@ does not migrate existing rows.
 `https://<host>/ui/` is a mobile-first web UI for the cloud blob cache: browse the library as the
 last cloud listing saw it (folders, documents, pages, which files are cached, Ink Bridge status),
 the raw cache entries by kind (root, index, metadata, content), and cache stats. The page itself
-is public and holds no data; it asks for `API_TOKEN` once and keeps it in the browser. It is
+is public and holds no data. It has no login of its own: it relies on the OAuth proxy in front of the
+app (e.g. oauth2-proxy via the Ingress `annotations`) and sends its session cookie with every API
+call. Set `API_AUTH_HEADER` to the header the proxy sets on authenticated requests (oauth2-proxy:
+`X-Auth-Request-Email`, passed on with `nginx.ingress.kubernetes.io/auth-response-headers`); a
+non-empty value then admits `/api/` requests without `API_TOKEN`. The proxy must cover `/api/` and
+overwrite that header there, or anyone could send it. When the session lapses the UI reloads to
+sign in again. It is
 read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
 the cache with the current root, fetching any index, `.metadata` or `.content` blob it lacks (a poll
 skips `.content`, which holds page counts and file types). Blobs already cached cost no request.
@@ -172,9 +178,11 @@ The UI is a Svelte 5 app styled with Tailwind CSS 4, in `web/`. `npm run build` 
 `inkbridge/web/`, which the server serves at `/ui/` (fingerprinted `assets/` cached for good,
 `index.html` never); without a build, `/ui/` answers 503. The Docker image builds it in a Node stage.
 For UI work, run `inkbridge serve` on :8000 and `npm run dev` in `web/`: Vite serves the app on
-http://localhost:5173/ui/ with hot reload and proxies `/api` to the server.
+http://localhost:5173/ui/ with hot reload and proxies `/api` to the server, adding
+`X-Auth-Request-Email` in place of the OAuth proxy (start the server with
+`API_AUTH_HEADER=X-Auth-Request-Email`).
 
-The same data is a REST API with `Authorization: Bearer <API_TOKEN>`:
+The same data is a REST API with `Authorization: Bearer <API_TOKEN>` (or the proxy's session):
 
 | Route                           | Returns                                                         |
 | ------------------------------- | --------------------------------------------------------------- |
