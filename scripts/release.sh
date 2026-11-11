@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Cut a release from a laptop: bump deploy/jsonnet/VERSION, commit, tag vX.Y.Z
 # and push both. The tag starts .github/workflows/release.yml, which tests,
-# publishes ghcr.io/derfred/remarkling:X.Y.Z and asks bugzoo-infrastructure to
-# open the deploy PR. From a phone, run the Release workflow instead.
+# publishes ghcr.io/derfred/remarkling:X.Y.Z and the GitHub release. From a
+# phone, run the Release workflow instead.
 #
 #   scripts/release.sh [patch|minor|major]   # default: patch
 set -euo pipefail

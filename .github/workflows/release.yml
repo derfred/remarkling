@@ -1,8 +1,8 @@
 name: Release
 
-# Publishes release vX.Y.Z: image ghcr.io/derfred/remarkling:X.Y.Z, a GitHub
-# release, and a ping to bugzoo-infrastructure, whose app-update workflow then
-# opens the PR that deploys it. Merging that PR is the deploy.
+# Publishes release vX.Y.Z: image ghcr.io/derfred/remarkling:X.Y.Z and a GitHub
+# release. Deploying it is up to whoever runs remarkling: a deployment watches
+# the releases and moves its pin of deploy/jsonnet to the new tag.
 #
 # Two ways in:
 #   - "Run workflow" (also from GitHub Mobile) with a bump: commits the bumped
@@ -11,12 +11,9 @@ name: Release
 #     commit, whose VERSION must already say X.Y.Z.
 #
 # deploy/jsonnet/VERSION is the release version: the jsonnet library at tag
-# vX.Y.Z deploys image X.Y.Z, so bugzoo-infrastructure pins one thing.
+# vX.Y.Z deploys image X.Y.Z, so a deployment pins one thing.
 # pyproject.toml keeps its own version (uv.lock records it).
-#
-# Optional secret INFRA_DISPATCH_TOKEN: fine-grained PAT, bugzoo-infrastructure
-# only, Contents: read and write (what repository_dispatch requires). Without
-# it, bugzoo-infrastructure still finds the release on its hourly poll.
+
 
 on:
   push:
@@ -143,17 +140,3 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "v$VERSION" --verify-tag --generate-notes --title "v$VERSION"
-
-      - name: Ask bugzoo-infrastructure to propose the deploy
-        env:
-          GH_TOKEN: ${{ secrets.INFRA_DISPATCH_TOKEN }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "INFRA_DISPATCH_TOKEN not set; bugzoo-infrastructure picks v$VERSION up on its hourly poll."
-            exit 0
-          fi
-          gh api repos/derfred/bugzoo-infrastructure/dispatches \
-            -f event_type=app-release \
-            -f "client_payload[app]=remarkling" \
-            -f "client_payload[version]=v$VERSION"
-          echo "Dispatched app-release remarkling v$VERSION"
