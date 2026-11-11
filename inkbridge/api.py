@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import hmac
 from contextlib import asynccontextmanager
-from importlib.resources import files
-from pathlib import PurePath
+from pathlib import Path, PurePath
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings
@@ -20,8 +20,23 @@ from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
-# Served without a token: the page holds no data and asks for the API token itself.
-PUBLIC_PATHS = {"/healthz", "/", "/ui", "/ui/"}
+# The cache explorer UI: a Svelte app in web/, built into here by `npm run build` (not in git).
+UI_DIR = Path(__file__).parent / "web"
+
+
+def _is_public(path: str) -> bool:
+    """Served without a token. The UI's files hold no data; the app asks for the API token itself."""
+    return path in ("/healthz", "/", "/ui") or path.startswith("/ui/")
+
+
+class UIFiles(StaticFiles):
+    """Vite fingerprints everything under assets/, so those can be cached for good; index.html never."""
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        immutable = PurePath(full_path).parent.name == "assets"
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-cache"
+        return response
 
 
 class TokenAuth:
@@ -31,7 +46,7 @@ class TokenAuth:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
+        if scope["type"] != "http" or _is_public(scope["path"]):
             return await self.app(scope, receive, send)
         settings = get_settings()
         is_mcp = scope["path"].startswith("/mcp")
@@ -157,15 +172,18 @@ def create_app() -> ASGIApp:
             raise HTTPException(404, "no such cache entry")
         return detail
 
-    ui_html = files("inkbridge").joinpath("web/index.html").read_text()
-
     @app.get("/", include_in_schema=False)
-    async def index():
-        return RedirectResponse("/ui")
-
     @app.get("/ui", include_in_schema=False)
-    async def ui():
-        return HTMLResponse(ui_html, headers={"Cache-Control": "no-cache"})
+    async def to_ui():
+        return RedirectResponse("/ui/")
+
+    if (UI_DIR / "index.html").is_file():
+        app.mount("/ui", UIFiles(directory=UI_DIR, html=True), name="ui")
+    else:
+        @app.get("/ui/{path:path}", include_in_schema=False)
+        async def ui_missing(path: str):
+            return HTMLResponse("The web UI is not built: run <code>npm ci && npm run build</code> in web/.",
+                                status_code=503)
 
     app.mount("/", mcp_app)
     return TokenAuth(app)

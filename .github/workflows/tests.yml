@@ -24,6 +24,16 @@ jobs:
           python-version: "3.14"
           enable-cache: true
 
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # The tests don't need the UI; this catches a broken Svelte build before the image does.
+      - run: npm ci && npm run build
+        working-directory: web
+
       - run: uv sync --locked
 
       - run: uv run playwright install --with-deps chromium

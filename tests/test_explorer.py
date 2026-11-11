@@ -79,7 +79,20 @@ def test_empty_cache():
 
 
 @pytest.fixture
-def client(filled, tmp_path, monkeypatch):
+def ui_dir(tmp_path, monkeypatch):
+    """A stand-in for the built UI, so these tests need no Node build."""
+    from inkbridge import api
+
+    ui = tmp_path / "ui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text('<div id="app"></div><script src="/ui/assets/index-abc.js"></script>')
+    (ui / "assets" / "index-abc.js").write_text("console.log(1)")
+    monkeypatch.setattr(api, "UI_DIR", ui)
+    return ui
+
+
+@pytest.fixture
+def client(filled, ui_dir, tmp_path, monkeypatch):
     store, spec, _ = filled
     monkeypatch.setenv("API_TOKEN", "phone")
     monkeypatch.setenv("MCP_TOKEN", "chat")
@@ -98,9 +111,22 @@ def client(filled, tmp_path, monkeypatch):
 def test_api_requires_token_but_ui_does_not(client):
     assert client.get("/api/cache").status_code == 401
     assert client.get("/api/cache", headers={"Authorization": "Bearer chat"}).status_code == 401
-    r = client.get("/ui")
-    assert r.status_code == 200 and "Cache explorer" in r.text
-    assert client.get("/", follow_redirects=False).headers["location"] == "/ui"
+    r = client.get("/ui/")
+    assert r.status_code == 200 and 'id="app"' in r.text
+    assert r.headers["cache-control"] == "no-cache"
+    r = client.get("/ui/assets/index-abc.js")
+    assert r.status_code == 200 and "immutable" in r.headers["cache-control"]
+    assert client.get("/", follow_redirects=False).headers["location"] == "/ui/"
+    assert client.get("/ui", follow_redirects=False).headers["location"] == "/ui/"
+
+
+def test_ui_not_built(client, ui_dir, monkeypatch):
+    from inkbridge.api import create_app
+
+    monkeypatch.setattr("inkbridge.api.UI_DIR", ui_dir / "missing")
+    with TestClient(create_app()) as c:
+        r = c.get("/ui/")
+        assert r.status_code == 503 and "npm run build" in r.text
 
 
 def test_api_routes(client):

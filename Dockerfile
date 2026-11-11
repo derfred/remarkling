@@ -2,6 +2,14 @@
 # Chromium and fonts come with the Playwright image; uv.lock must pin the playwright package to the same version.
 ARG PLAYWRIGHT_VERSION=1.64.1
 
+# ---------- web: the cache explorer UI (Svelte + Tailwind), built into inkbridge/web ----------
+FROM node:24-slim AS web
+WORKDIR /app/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY web/ ./
+RUN npm run build
+
 # ---------- builder: interpreter + venv ----------
 # Same base as the runtime: its layers are pulled anyway, and glibc/paths match exactly.
 FROM mcr.microsoft.com/playwright/python:v${PLAYWRIGHT_VERSION}-noble AS builder
@@ -25,6 +33,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY README.md ./
 COPY inkbridge ./inkbridge
+COPY --from=web /app/inkbridge/web ./inkbridge/web
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-editable
 
