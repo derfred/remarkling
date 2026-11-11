@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f1" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="remarkling">
+<title>remarkling cache</title>
+<style>
+:root {
+  --bg: #f6f5f1; --surface: #ffffff; --surface-2: #efede7; --line: #e2dfd7;
+  --text: #1d1d1b; --muted: #6f6c64; --accent: #2f5bd3; --accent-soft: #e6ecfb;
+  --ok: #2d7a46; --ok-soft: #e3f2e8; --warn: #9a6200; --warn-soft: #fbf0d9;
+  --danger: #b3261e; --danger-soft: #fbe5e3;
+  --radius: 14px; --tap: 48px;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16171a; --surface: #202226; --surface-2: #2a2c31; --line: #33363c;
+    --text: #ecebe6; --muted: #9b9a94; --accent: #8aa8ff; --accent-soft: #263152;
+    --ok: #7fcf98; --ok-soft: #1f3327; --warn: #f0c060; --warn-soft: #3a3020;
+    --danger: #ff8a80; --danger-soft: #3d2220;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+  padding-bottom: calc(64px + env(safe-area-inset-bottom));
+}
+button, input, select { font: inherit; color: inherit; }
+a { color: var(--accent); }
+
+/* header */
+header {
+  position: sticky; top: 0; z-index: 10;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  padding: calc(8px + env(safe-area-inset-top)) 16px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.bar { display: flex; align-items: center; gap: 8px; min-height: 44px; }
+.bar h1 { flex: 1; font-size: 20px; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn {
+  width: 44px; height: 44px; border: 0; background: transparent; border-radius: 22px;
+  display: grid; place-items: center; cursor: pointer; flex: none;
+}
+.icon-btn:active { background: var(--surface-2); }
+.icon-btn svg { width: 22px; height: 22px; }
+.search {
+  width: 100%; height: 44px; margin-top: 4px; padding: 0 14px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--surface); outline: none;
+}
+.search:focus { border-color: var(--accent); }
+.crumbs { display: flex; gap: 4px; overflow-x: auto; padding: 6px 0 2px; scrollbar-width: none; font-size: 14px; }
+.crumbs::-webkit-scrollbar { display: none; }
+.crumbs a { white-space: nowrap; text-decoration: none; padding: 4px 8px; border-radius: 8px; background: var(--surface-2); color: var(--text); }
+.crumbs span { color: var(--muted); align-self: center; }
+.chips { display: flex; gap: 6px; overflow-x: auto; padding: 8px 0 2px; scrollbar-width: none; }
+.chips::-webkit-scrollbar { display: none; }
+.chip {
+  flex: none; height: 34px; padding: 0 14px; border-radius: 17px; border: 1px solid var(--line);
+  background: var(--surface); cursor: pointer; font-size: 14px;
+}
+.chip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+main { padding: 12px 16px 24px; max-width: 760px; margin: 0 auto; }
+
+/* lists */
+.list { background: var(--surface); border-radius: var(--radius); border: 1px solid var(--line); overflow: hidden; }
+.row {
+  display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 10px 14px;
+  border-top: 1px solid var(--line); text-decoration: none; color: inherit; cursor: pointer;
+}
+.row:first-child { border-top: 0; }
+.row:active { background: var(--surface-2); }
+.row .ico { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; flex: none; background: var(--surface-2); color: var(--muted); }
+.row .ico.folder { background: var(--accent-soft); color: var(--accent); }
+.row .ico svg { width: 20px; height: 20px; }
+.row .body { flex: 1; min-width: 0; }
+.row .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .sub { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .chev { color: var(--muted); flex: none; }
+.mono { font-family: var(--mono); font-size: 13px; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 6px; vertical-align: 1px; margin-left: 4px; text-transform: uppercase; letter-spacing: .03em; }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.muted { background: var(--surface-2); color: var(--muted); }
+.badge.danger { background: var(--danger-soft); color: var(--danger); }
+
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 22px 4px 8px; font-weight: 600; }
+h2:first-child { margin-top: 4px; }
+
+/* key-value */
+.kv { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
+.kv div { display: flex; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--line); }
+.kv div:first-child { border-top: 0; }
+.kv dt { color: var(--muted); flex: none; width: 38%; max-width: 160px; }
+.kv dd { margin: 0; flex: 1; min-width: 0; overflow-wrap: anywhere; text-align: right; }
+
+/* tiles */
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
+.tile .n { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.tile .l { font-size: 13px; color: var(--muted); }
+.kind-row { padding: 12px 14px; border-top: 1px solid var(--line); }
+.kind-row:first-child { border-top: 0; }
+.kind-row .top { display: flex; justify-content: space-between; font-size: 14px; }
+.kind-row .meter { height: 6px; border-radius: 3px; background: var(--surface-2); margin-top: 8px; overflow: hidden; }
+.kind-row .meter i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+
+pre.code {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 12px 14px; margin: 0; overflow-x: auto; font: 12.5px/1.5 var(--mono); white-space: pre;
+  max-height: 70vh;
+}
+details { margin-top: 10px; }
+details summary { cursor: pointer; padding: 12px 4px; color: var(--accent); font-weight: 550; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::before { content: "▸ "; }
+details[open] summary::before { content: "▾ "; }
+
+.btn {
+  display: block; width: 100%; height: var(--tap); border-radius: 12px; border: 0;
+  background: var(--accent); color: #fff; font-weight: 600; cursor: pointer;
+}
+.btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--line); margin-top: 12px; }
+.empty { text-align: center; color: var(--muted); padding: 48px 16px; }
+.error { background: var(--danger-soft); color: var(--danger); padding: 12px 14px; border-radius: 12px; margin-bottom: 12px; }
+.note { color: var(--muted); font-size: 14px; margin: 8px 4px; }
+.spinner { width: 28px; height: 28px; margin: 56px auto; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* tab bar */
+nav.tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom);
+}
+nav.tabs a {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  height: 56px; text-decoration: none; color: var(--muted); font-size: 11px; font-weight: 550;
+}
+nav.tabs a svg { width: 24px; height: 24px; }
+nav.tabs a[aria-current="page"] { color: var(--accent); }
+
+.login { max-width: 420px; margin: 12vh auto 0; }
+.login p { color: var(--muted); }
+.login input { width: 100%; height: var(--tap); padding: 0 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); margin: 8px 0 12px; }
+
+@media (min-width: 720px) {
+  .tiles { grid-template-columns: repeat(4, 1fr); }
+  nav.tabs { justify-content: center; }
+  nav.tabs a { flex: 0 0 120px; }
+}
+</style>
+</head>
+<body>
+<header id="header"></header>
+<main id="main"><div class="spinner"></div></main>
+<nav class="tabs" id="tabs" hidden>
+  <a href="#/library" data-tab="library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Library</a>
+  <a href="#/blobs" data-tab="blobs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v6c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></svg>Blobs</a>
+  <a href="#/stats" data-tab="stats"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>Stats</a>
+</nav>
+<script>
+"use strict";
+const TOKEN_KEY = "remarkling.apiToken";
+const ICONS = {
+  back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>',
+  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>',
+  folder: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
+  doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
+  blob: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>',
+  chev: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 6l6 6-6 6"/></svg>',
+  logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/></svg>',
+};
+
+// --- tiny DOM helper: children are nodes or text (never parsed as HTML) -------------------------
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "html") el.innerHTML = v;  // only ever our own ICONS
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
+  return el;
+}
+const icon = (name, cls) => h("span", { class: cls, html: ICONS[name] });
+
+// --- formatting ---------------------------------------------------------------------------------
+function bytes(n) {
+  if (n == null) return "–";
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i];
+}
+function when(ts) {
+  if (!ts) return "–";
+  const d = new Date(ts * 1000), s = (Date.now() - d) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + " min ago";
+  if (s < 86400) return Math.floor(s / 3600) + " h ago";
+  if (s < 86400 * 7) return Math.floor(s / 86400) + " d ago";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+const fullTime = ts => ts ? new Date(ts * 1000).toLocaleString() : "–";
+const short = s => s ? s.slice(0, 12) + "…" : "–";
+const enc = encodeURIComponent;
+
+// --- API ----------------------------------------------------------------------------------------
+const token = {
+  get() { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } },
+  set(v) { try { localStorage.setItem(TOKEN_KEY, v); } catch {} },
+  clear() { try { localStorage.removeItem(TOKEN_KEY); } catch {} },
+};
+class AuthError extends Error {}
+async function api(path) {
+  const r = await fetch("/api/cache" + path, { headers: { Authorization: "Bearer " + token.get() } });
+  if (r.status === 401) throw new AuthError("unauthorized");
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status + " " + r.statusText);
+  return r.json();
+}
+let libraryCache = null;
+async function library(force) {
+  if (!libraryCache || force) libraryCache = (await api("/library")).items;
+  return libraryCache;
+}
+
+// --- layout -------------------------------------------------------------------------------------
+const $header = document.getElementById("header"), $main = document.getElementById("main"), $tabs = document.getElementById("tabs");
+function setHeader({ title, back, extra }) {
+  const bar = h("div", { class: "bar" },
+    back ? h("button", { class: "icon-btn", "aria-label": "Back", html: ICONS.back, onclick: () => history.length > 1 ? history.back() : go(back) }) : null,
+    h("h1", {}, title),
+    h("button", { class: "icon-btn", "aria-label": "Refresh", html: ICONS.refresh, onclick: () => { libraryCache = null; route(); } }),
+  );
+  $header.replaceChildren(bar, ...(extra || []));
+}
+function setTab(name) {
+  $tabs.hidden = false;
+  for (const a of $tabs.querySelectorAll("a")) {
+    if (a.dataset.tab === name) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
+  }
+}
+const go = hash => { location.hash = hash; };
+const loading = () => $main.replaceChildren(h("div", { class: "spinner" }));
+
+function row({ href, ico, icoCls, title, sub, badges, mono }) {
+  return h("a", { class: "row", href },
+    icon(ico, "ico " + (icoCls || "")),
+    h("div", { class: "body" },
+      h("div", { class: "title" + (mono ? " mono" : "") }, title, ...(badges || [])),
+      sub ? h("div", { class: "sub" }, sub) : null),
+    href ? icon("chev", "chev") : null);
+}
+const badge = (text, kind) => h("span", { class: "badge " + (kind || "muted") }, text);
+function kv(pairs) {
+  return h("dl", { class: "kv" }, pairs.filter(p => p).map(([k, v]) => h("div", {}, h("dt", {}, k), h("dd", {}, v ?? "–"))));
+}
+const json = v => h("pre", { class: "code" }, JSON.stringify(v, null, 2));
+
+function inkBadge(ink) {
+  if (!ink) return null;
+  return badge(ink.status, ink.status === "pulled" ? "ok" : ink.status === "pushed" ? "warn" : "muted");
+}
+function nodeRow(n) {
+  const isFolder = n.type === "folder";
+  const sub = isFolder
+    ? `${n.children} item${n.children === 1 ? "" : "s"}`
+    : [n.file_type && n.file_type.toUpperCase(), n.page_count != null && `${n.page_count} p.`, when(n.last_modified)].filter(Boolean).join(" · ");
+  return row({
+    href: isFolder ? "#/library/" + enc(n.uuid) : "#/doc/" + enc(n.uuid),
+    ico: isFolder ? "folder" : "doc", icoCls: isFolder ? "folder" : "",
+    title: n.name, sub: n.metadata_cached ? sub : "metadata not cached",
+    badges: [n.pinned && badge("★", "warn"), inkBadge(n.inkbridge)],
+  });
+}
+
+// --- views --------------------------------------------------------------------------------------
+async function viewLibrary(folder) {
+  setTab("library");
+  const q = sessionStorage.getItem("libq") || "";
+  const items = await library();
+  const byId = Object.fromEntries(items.map(n => [n.uuid, n]));
+  const current = folder && folder !== "trash" ? byId[folder] : null;
+  const title = folder === "trash" ? "Trash" : current ? current.name : "Library";
+
+  const crumbs = [];
+  if (folder) {
+    const chain = []; let p = folder === "trash" ? null : current?.parent; const seen = new Set();
+    while (p && byId[p] && !seen.has(p)) { seen.add(p); chain.unshift(byId[p]); p = byId[p].parent; }
+    crumbs.push(h("a", { href: "#/library" }, "Library"));
+    if (p === "trash") crumbs.push(h("span", {}, "›"), h("a", { href: "#/library/trash" }, "Trash"));
+    for (const c of chain) crumbs.push(h("span", {}, "›"), h("a", { href: "#/library/" + enc(c.uuid) }, c.name));
+  }
+  const search = h("input", { class: "search", type: "search", placeholder: "Search all documents", value: q, enterkeyhint: "search", autocomplete: "off" });
+  setHeader({ title, back: folder ? "#/library" : null, extra: [search, crumbs.length ? h("div", { class: "crumbs" }, crumbs) : null] });
+
+  const render = () => {
+    const term = search.value.trim().toLowerCase();
+    sessionStorage.setItem("libq", search.value);
+    let list;
+    if (term) list = items.filter(n => n.name.toLowerCase().includes(term) || n.uuid.startsWith(term) || n.inkbridge?.doc_id?.includes(term));
+    else if (folder === "trash") list = items.filter(n => n.parent === "trash");
+    else list = items.filter(n => (n.parent || "") === (folder || "") && !(n.deleted && !folder));
+    const out = [];
+    if (!items.length) {
+      out.push(h("div", { class: "empty" }, "The cache holds no library yet.", h("br"), "It fills on the next cloud listing (a poll or a push)."));
+    } else if (!list.length) {
+      out.push(h("div", { class: "empty" }, term ? "No matches." : "This folder is empty."));
+    } else {
+      out.push(h("div", { class: "list" }, list.map(nodeRow)));
+    }
+    if (!folder && !term) {
+      const trashed = items.filter(n => n.parent === "trash").length;
+      if (trashed) out.push(h("h2", {}, "Other"), h("div", { class: "list" },
+        row({ href: "#/library/trash", ico: "trash", title: "Trash", sub: `${trashed} item${trashed === 1 ? "" : "s"}` })));
+    }
+    if (current) out.push(h("details", {}, h("summary", {}, "Folder details"), kv([
+      ["UUID", h("span", { class: "mono" }, current.uuid)], ["Modified", fullTime(current.last_modified)],
+    ])));
+    $main.replaceChildren(...out);
+  };
+  search.addEventListener("input", render);
+  render();
+}
+
+async function viewDoc(uuid) {
+  setTab("library");
+  setHeader({ title: "Document", back: "#/library" });
+  const d = await api("/library/" + enc(uuid));
+  setHeader({
+    title: d.name, back: d.parent && d.parent !== "trash" ? "#/library/" + enc(d.parent) : "#/library",
+    extra: [h("div", { class: "crumbs" }, h("a", { href: "#/library" }, "Library"),
+      d.path.flatMap(p => [h("span", {}, "›"), h("a", { href: "#/library/" + enc(p.uuid) }, p.name)]))],
+  });
+  const out = [];
+  if (!d.metadata) out.push(h("div", { class: "error" }, "This document's metadata is not in the cache."));
+  out.push(h("h2", {}, "Overview"), kv([
+    ["Type", d.type + (d.file_type ? " · " + d.file_type.toUpperCase() : "")],
+    d.page_count != null && ["Pages", d.page_count],
+    ["Modified", fullTime(d.last_modified)],
+    ["Opened", fullTime(d.last_opened)],
+    ["Size", bytes(d.size)],
+    d.tags.length && ["Tags", d.tags.join(", ")],
+    ["Pinned", d.pinned ? "yes" : "no"],
+    d.deleted && ["Status", badge("trashed", "danger")],
+    ["UUID", h("span", { class: "mono" }, d.uuid)],
+  ]));
+  if (d.inkbridge) {
+    const ink = d.inkbridge;
+    out.push(h("h2", {}, "Ink Bridge"), kv([
+      ["Doc ID", h("span", { class: "mono" }, ink.doc_id)],
+      ["Title", ink.title], ["Status", inkBadge(ink)], ["Source", ink.source_kind],
+      ["Pushed", fullTime(ink.pushed_at)], ink.pulled_at && ["Pulled", fullTime(ink.pulled_at)],
+      ink.trilium_url && ["Trilium", h("a", { href: ink.trilium_url, target: "_blank", rel: "noopener" }, "Open note")],
+    ]));
+  }
+  out.push(h("h2", {}, `Files (${d.file_list.length})`));
+  const files = d.file_list.map(f => row({
+    href: f.cached ? "#/blob/" + enc("cloud.blob:" + f.hash) : null,
+    ico: "blob", title: f.name.replace(d.uuid, "…"), mono: true,
+    sub: bytes(f.size) + " · " + short(f.hash),
+    badges: [f.cached ? badge("cached", "ok") : badge("not cached")],
+  }));
+  if (d.index_key) files.unshift(row({ href: "#/blob/" + enc(d.index_key), ico: "blob", title: "….docSchema", mono: true, sub: "document index · " + short(d.hash), badges: [badge("cached", "ok")] }));
+  out.push(files.length ? h("div", { class: "list" }, files) : h("p", { class: "note" }, "Document index not cached."));
+  if (d.metadata) out.push(h("details", {}, h("summary", {}, "Raw metadata"), json(d.metadata)));
+  if (d.content) out.push(h("details", {}, h("summary", {}, "Raw content"), json(d.content)));
+  $main.replaceChildren(...out);
+}
+
+const KINDS = ["all", "root", "index", "metadata", "content", "other"];
+async function viewBlobs() {
+  setTab("blobs");
+  const state = JSON.parse(sessionStorage.getItem("blobs") || '{"kind":"all","q":""}');
+  const search = h("input", { class: "search", type: "search", placeholder: "Search key, file or document", value: state.q, enterkeyhint: "search", autocomplete: "off" });
+  const chips = h("div", { class: "chips" }, KINDS.map(k => h("button", {
+    class: "chip", "aria-pressed": String(state.kind === k),
+    onclick: e => { state.kind = k; for (const c of chips.children) c.setAttribute("aria-pressed", String(c === e.currentTarget)); load(); },
+  }, k)));
+  setHeader({ title: "Blobs", extra: [search, chips] });
+  let offset = 0, timer;
+  const listEl = h("div", { class: "list" }), countEl = h("p", { class: "note" }), more = h("button", { class: "btn secondary", hidden: true, onclick: () => load(true) }, "Load more");
+
+  async function load(append) {
+    sessionStorage.setItem("blobs", JSON.stringify({ kind: state.kind, q: search.value }));
+    if (!append) { offset = 0; listEl.replaceChildren(); $main.replaceChildren(h("div", { class: "spinner" })); }
+    const qs = new URLSearchParams({ q: search.value, limit: 100, offset });
+    if (state.kind !== "all") qs.set("kind", state.kind);
+    const r = await api("/blobs?" + qs).catch(fail);
+    if (!r) return;
+    offset += r.items.length;
+    listEl.append(...r.items.map(b => row({
+      href: "#/blob/" + enc(b.key), ico: "blob", mono: !b.doc_name,
+      title: b.doc_name || b.filename || short(b.hash) || b.key,
+      sub: [b.kind, b.doc_name ? (b.filename || "").replace(b.doc_uuid, "…") : null, bytes(b.size), when(b.created_at)].filter(Boolean).join(" · "),
+    })));
+    countEl.textContent = `${r.total} entr${r.total === 1 ? "y" : "ies"}`;
+    more.hidden = offset >= r.total;
+    $main.replaceChildren(countEl, r.total ? listEl : h("div", { class: "empty" }, "Nothing here."), more);
+  }
+  search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => load(), 250); });
+  await load();
+}
+
+async function viewBlob(key) {
+  setTab("blobs");
+  setHeader({ title: "Blob", back: "#/blobs" });
+  const b = await api("/blobs/" + key.split("/").map(enc).join("/"));
+  setHeader({ title: b.doc_name || b.filename || b.kind, back: "#/blobs" });
+  const out = [h("h2", {}, "Entry"), kv([
+    ["Kind", badge(b.kind, b.kind === "root" ? "ok" : "muted")],
+    b.filename && ["File", h("span", { class: "mono" }, b.filename)],
+    b.doc_uuid && ["Document", h("a", { href: "#/doc/" + enc(b.doc_uuid) }, b.doc_name || b.doc_uuid)],
+    ["Size", bytes(b.size)], ["Cached", fullTime(b.created_at)],
+    ["Key", h("span", { class: "mono" }, b.key)],
+  ])];
+  if (b.index) {
+    out.push(h("h2", {}, `Index entries (${b.index.entries.length}) · schema ${b.index.schema}`),
+      h("div", { class: "list" }, b.index.entries.map(e => {
+        const isDoc = !e.id.includes(".");
+        return row({
+          href: isDoc ? "#/doc/" + enc(e.id) : e.cached ? "#/blob/" + enc("cloud.blob:" + e.hash) : null,
+          ico: isDoc ? "doc" : "blob", mono: !isDoc || !e.name,
+          title: isDoc ? (e.name || e.id) : e.id.replace(b.doc_uuid || "\0", "…"),
+          sub: [bytes(e.size), isDoc && `${e.subfiles} files`, short(e.hash)].filter(Boolean).join(" · "),
+          badges: [e.cached ? badge("cached", "ok") : badge("not cached")],
+        });
+      })));
+  }
+  out.push(h("h2", {}, "Value · " + b.encoding));
+  out.push(b.encoding === "json" ? json(b.value) : h("pre", { class: "code" }, b.value));
+  $main.replaceChildren(...out);
+}
+
+async function viewStats() {
+  setTab("stats");
+  setHeader({ title: "Cache" });
+  const s = await api("");
+  const tile = (n, l) => h("div", { class: "tile" }, h("div", { class: "n" }, n), h("div", { class: "l" }, l));
+  const max = Math.max(1, ...Object.values(s.by_kind).map(k => k.bytes));
+  const out = [
+    h("h2", {}, "Library"),
+    h("div", { class: "tiles" },
+      tile(s.library.documents, "documents"), tile(s.library.folders, "folders"),
+      tile(s.library.tracked, "tracked by Ink Bridge"), tile(s.library.trashed, "in trash")),
+    h("h2", {}, "Store"),
+    h("div", { class: "tiles" }, tile(s.entries, "entries"), tile(bytes(s.bytes), "stored")),
+    h("h2", {}, "By kind"),
+    h("div", { class: "list" }, Object.entries(s.by_kind).map(([k, v]) => h("a", { class: "kind-row", href: "#/blobs", style: "display:block;color:inherit;text-decoration:none",
+      onclick: () => sessionStorage.setItem("blobs", JSON.stringify({ kind: k, q: "" })) },
+      h("div", { class: "top" }, h("span", {}, h("b", {}, k), " · ", v.count), h("span", { class: "mono" }, bytes(v.bytes))),
+      h("div", { class: "meter" }, h("i", { style: `width:${(v.bytes / max * 100).toFixed(1)}%` }))))),
+    h("h2", {}, "Root"),
+    s.root ? kv([
+      ["Hash", h("a", { class: "mono", href: "#/blob/" + enc("cloud.blob:" + s.root.hash) }, short(s.root.hash))],
+      ["Entries", s.root.entries], ["Cached", fullTime(s.root.created_at)],
+      s.root.roots_cached > 1 && ["Roots cached", s.root.roots_cached],
+    ]) : h("p", { class: "note" }, "No root index cached yet."),
+    h("h2", {}, "Health"),
+    kv([
+      ["Uncached metadata", s.library.uncached], ["Unreferenced entries", s.unreferenced],
+      ["Oldest entry", fullTime(s.oldest)], ["Newest entry", fullTime(s.newest)],
+    ]),
+    h("button", { class: "btn secondary", onclick: () => { token.clear(); route(); } }, "Forget API token"),
+  ];
+  $main.replaceChildren(...out);
+}
+
+function viewLogin(message) {
+  $tabs.hidden = true;
+  $header.replaceChildren(h("div", { class: "bar" }, h("h1", {}, "remarkling")));
+  const input = h("input", { type: "password", placeholder: "API token", autocomplete: "current-password", required: true });
+  const form = h("form", { class: "login", onsubmit: e => { e.preventDefault(); token.set(input.value.trim()); route(); } },
+    h("h2", {}, "Cache explorer"),
+    h("p", {}, "Enter the API_TOKEN of this server. It stays in this browser."),
+    message ? h("div", { class: "error" }, message) : null,
+    input, h("button", { class: "btn", type: "submit" }, "Continue"));
+  $main.replaceChildren(form);
+  input.focus();
+}
+
+function fail(err) {
+  if (err instanceof AuthError) { token.clear(); viewLogin("That token was not accepted."); return; }
+  $main.replaceChildren(h("div", { class: "error" }, String(err.message || err)),
+    h("button", { class: "btn secondary", onclick: route }, "Retry"));
+}
+
+// --- router -------------------------------------------------------------------------------------
+async function route() {
+  if (!token.get()) return viewLogin();
+  const [, view, ...rest] = (location.hash || "#/library").split("/");
+  const arg = rest.length ? decodeURIComponent(rest.join("/")) : null;
+  loading();
+  window.scrollTo(0, 0);
+  try {
+    if (view === "doc" && arg) await viewDoc(arg);
+    else if (view === "blobs") await viewBlobs();
+    else if (view === "blob" && arg) await viewBlob(arg);
+    else if (view === "stats") await viewStats();
+    else await viewLibrary(arg);
+  } catch (err) { fail(err); }
+}
+window.addEventListener("hashchange", route);
+route();
+</script>
+</body>
+</html>

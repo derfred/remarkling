@@ -22,9 +22,11 @@ inkbridge/
     interpret.py   # 1,400 px strips, 15% overlap, inked strips only -> Claude -> merged feedback
     trilium.py     # ETAPI note per doc; re-pull updates in place
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
+    explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), poll_outbox()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
-  api.py           # FastAPI /push /poll /healthz + MCP at /mcp, bearer-token auth
+  api.py           # FastAPI /push /poll /healthz, /api/cache, /ui + MCP at /mcp, bearer-token auth
+  web/index.html   # cache explorer UI (single file, no build step)
   poller.py        # poll_outbox() every POLL_INTERVAL_S
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
 prompts/interpret.md
@@ -144,6 +146,24 @@ sit on it too so both containers see the same one. Switching does not migrate ex
   Notification "Pulled N: titles" (optionally open `trilium_url`), else "Nothing in Outbox".
 - **Send to reMarkable**: Show in Share Sheet for URLs and PDFs; POST `https://<host>/push` as a form
   with `url` or `file` (and optional `title`), same header.
+
+## Cache explorer
+
+`https://<host>/ui` is a mobile-first web UI for the cloud blob cache: browse the library as the
+last cloud listing saw it (folders, documents, pages, which files are cached, Ink Bridge status),
+the raw cache entries by kind (root, index, metadata, content), and cache stats. The page itself
+is public and holds no data; it asks for `API_TOKEN` once and keeps it in the browser. It is
+read-only and never calls the cloud, so it is as fresh as the last poll or push.
+
+The same data is a REST API, all `GET`, with `Authorization: Bearer <API_TOKEN>`:
+
+| Route                           | Returns                                                         |
+| ------------------------------- | --------------------------------------------------------------- |
+| `/api/cache`                    | counts and bytes by kind, current root, library and health stats |
+| `/api/cache/library`            | every document and folder in the cached root (flat; `parent` links them) |
+| `/api/cache/library/{uuid}`     | one node: breadcrumbs, metadata, content, its files and whether each is cached |
+| `/api/cache/blobs`              | cache entries; `kind`, `q` (key, file or document name), `limit`, `offset` |
+| `/api/cache/blobs/{key}`        | one entry decoded: parsed index, JSON or text                   |
 
 ## Claude connector (M7)
 
