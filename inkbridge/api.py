@@ -3,19 +3,22 @@
 from __future__ import annotations
 
 import hmac
+import json
+import mimetypes
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePath
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings
 from .core.explorer import KINDS, CacheSnapshot
 from .core.pipeline import get_bridge
+from .core.transport.base import RemoteDoc
 from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
@@ -64,6 +67,31 @@ class TokenAuth:
         else:
             return await self.app(scope, receive, send)
         await response(scope, receive, send)
+
+
+# Types browsers know but mimetypes may not; everything else is application/octet-stream.
+FILE_TYPES = {".pdf": "application/pdf", ".epub": "application/epub+zip", ".json": "application/json",
+              ".metadata": "application/json", ".content": "application/json", ".pagedata": "text/plain",
+              ".rmdoc": "application/zip", ".rm": "application/octet-stream"}  # not RealMedia
+
+
+def download_name(visible_name: str, doc_uuid: str, name: str) -> str:
+    """Name a file after its document: <uuid>.pdf -> Spec.pdf, <uuid>/<page>.rm -> Spec <page>.rm."""
+    rest = name.removeprefix(doc_uuid)
+    if rest.startswith("/"):
+        rest = " " + rest[1:].replace("/", " ")
+    base = "".join(c for c in visible_name if c not in '/\\:*?"<>|' and c >= " ").strip() or doc_uuid
+    return base + rest
+
+
+def file_response(data: bytes, filename: str) -> Response:
+    suffix = PurePath(filename).suffix.lower()
+    ctype = FILE_TYPES.get(suffix) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    # filename= for old clients (ASCII only), filename*= (RFC 6266) for the real name.
+    ascii_name = filename.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
+    disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
+    return Response(data, media_type=ctype, headers={"Content-Disposition": disposition,
+                                                    "Cache-Control": "private, no-store"})
 
 
 def _mcp_app():
@@ -171,6 +199,37 @@ def create_app() -> ASGIApp:
         if detail is None:
             raise HTTPException(404, "no such cache entry")
         return detail
+
+    # --- downloads: a document's files, fetched from the tablet (cloud or SSH), not the cache -----
+
+    async def visible_name(uuid: str) -> str:
+        node = snapshot().nodes.get(uuid)
+        if node is not None and node.metadata is not None:
+            return node.name
+        try:
+            meta = json.loads(await get_bridge().transport.download_file(uuid, f"{uuid}.metadata"))
+            return meta.get("visibleName") or uuid
+        except (FileNotFoundError, ValueError):
+            return uuid
+
+    @app.get("/api/docs/{uuid}/rmdoc")
+    async def download_rmdoc(uuid: str):
+        """The whole document as an .rmdoc (zip): the original PDF/EPUB, metadata and page strokes."""
+        try:
+            rmdoc = await get_bridge().transport.download(RemoteDoc(uuid, "", ""))
+        except FileNotFoundError as e:
+            raise HTTPException(404, "no such document") from e
+        name = rmdoc.metadata.get("visibleName") or await visible_name(uuid)
+        return file_response(rmdoc.to_zip(), download_name(name, uuid, ".rmdoc"))
+
+    @app.get("/api/docs/{uuid}/files/{name:path}")
+    async def download_file(uuid: str, name: str):
+        """One file of a document, by its name in the doc index ("<uuid>.pdf", "<uuid>/<page>.rm")."""
+        try:
+            data = await get_bridge().transport.download_file(uuid, name)
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        return file_response(data, download_name(await visible_name(uuid), uuid, name))
 
     @app.get("/", include_in_schema=False)
     @app.get("/ui", include_in_schema=False)

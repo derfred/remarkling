@@ -24,7 +24,7 @@ import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from .base import Cache, RemoteDoc, RmDoc, document_metadata, new_uuid, now_ms, pdf_content
+from .base import Cache, RemoteDoc, RmDoc, check_file_name, document_metadata, new_uuid, now_ms, pdf_content
 
 log = logging.getLogger(__name__)
 
@@ -526,10 +526,22 @@ class CloudTransport:
         _, _, root = await self.get_root()
         entry = root.get(doc.uuid)
         if entry is None:
-            raise CloudError(f"document {doc.uuid} not found")
+            raise FileNotFoundError(f"document {doc.uuid} not found")
         index, _ = await self._doc(entry)
         blobs = await asyncio.gather(*(self.get_blob(e.hash, e.id) for e in index.entries))
         return RmDoc(uuid=doc.uuid, files={e.id: b for e, b in zip(index.entries, blobs)})
+
+    async def download_file(self, doc_uuid: str, name: str) -> bytes:
+        check_file_name(doc_uuid, name)
+        _, _, root = await self.get_root()
+        entry = root.get(doc_uuid)
+        if entry is None:
+            raise FileNotFoundError(f"document {doc_uuid} not found")
+        index, _ = await self._doc(entry)
+        file = index.get(name)
+        if file is None:
+            raise FileNotFoundError(f"document {doc_uuid} has no file {name}")
+        return await self.get_blob(file.hash, file.id)
 
     async def move(self, doc: RemoteDoc, folder: str) -> None:
         folder_uuid = await self.ensure_folder(folder)

@@ -62,3 +62,40 @@ def test_mcp_endpoint_accepts_query_token(client):
     r = client.post("/mcp?token=chat", json=body, headers=headers)
     assert r.status_code == 200, r.text
     assert "Ink Bridge" in r.text
+
+
+def test_download_files_and_rmdoc(client):
+    import io
+    import zipfile
+    from urllib.parse import quote
+
+    auth = {"Authorization": "Bearer phone"}
+    r = client.post("/push", headers=auth, files={"file": ("spec.pdf", sample_pdf(), "application/pdf")})
+    u = client.bridge.store.get(r.json()["doc_id"]).rm_uuid
+    pdf = client.bridge.transport.docs[u][1].pdf  # as uploaded, with its /InkBridgeId stamp
+    name = client.bridge.transport.docs[u][0].name  # "spec · rm-xxxxxx"
+
+    assert client.get(f"/api/docs/{u}/files/{u}.pdf").status_code == 401
+    r = client.get(f"/api/docs/{u}/files/{u}.pdf", headers=auth)
+    assert r.status_code == 200 and r.content == pdf
+    assert r.headers["content-type"] == "application/pdf"
+    disposition = r.headers["content-disposition"]
+    assert disposition.startswith('attachment; filename="spec _ rm-')
+    assert disposition.endswith(f"filename*=UTF-8''{quote(name + '.pdf', safe='')}")
+
+    page = client.bridge.transport.docs[u][1].page_ids()[0]
+    client.bridge.transport.annotate(u, rm_page([line([(0, 300), (10, 310)])]), move_to="Inbox")
+    r = client.get(f"/api/docs/{u}/files/{u}/{page}.rm", headers=auth)
+    assert r.status_code == 200 and r.headers["content-type"] == "application/octet-stream"
+    assert quote(f"{name} {page}.rm", safe="") in r.headers["content-disposition"]
+
+    assert client.get(f"/api/docs/{u}/files/{u}.epub", headers=auth).status_code == 404
+    assert client.get(f"/api/docs/{u}/files/{u}/../secret", headers=auth).status_code == 404
+    assert client.get("/api/docs/nope/files/nope.pdf", headers=auth).status_code == 404
+
+    r = client.get(f"/api/docs/{u}/rmdoc", headers=auth)
+    assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+    assert quote(name + ".rmdoc", safe="") in r.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        assert z.read(f"{u}.pdf") == pdf and f"{u}/{page}.rm" in z.namelist()
+    assert client.get("/api/docs/nope/rmdoc", headers=auth).status_code == 404

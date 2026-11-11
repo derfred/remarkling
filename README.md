@@ -25,7 +25,7 @@ inkbridge/
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), poll_outbox()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
-  api.py           # FastAPI /push /poll /healthz, /api/cache, /ui + MCP at /mcp, bearer-token auth
+  api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp, bearer-token auth
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll_outbox() on cloud websocket notifications (timer fallback)
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
@@ -179,6 +179,19 @@ The same data is a REST API with `Authorization: Bearer <API_TOKEN>`:
 | `/api/cache/blobs`              | cache entries; `kind`, `q` (key, file or document name), `limit`, `offset` |
 | `/api/cache/blobs/{key}`        | one entry decoded: parsed index, JSON or text                   |
 | `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched (501 on SSH) |
+
+### Downloads
+
+A document's page in the UI downloads its original (PDF or EPUB), any single file from its index,
+or the whole document as an `.rmdoc` (a zip with the original, metadata and every page's strokes).
+Unlike the rest of the explorer, downloads don't come from the cache. The server fetches them from
+the tablet on request, over the cloud or SSH transport, so they work for files marked "not cached".
+Downloaded files are named after the document, e.g. `Spec.pdf` or `Spec <page>.rm`.
+
+| Route                                | Returns                                                    |
+| ------------------------------------ | ---------------------------------------------------------- |
+| `/api/docs/{uuid}/files/{name}`      | one file by its index name (`<uuid>.pdf`, `<uuid>/<page>.rm`); 404 if missing |
+| `/api/docs/{uuid}/rmdoc`             | the whole document as an `.rmdoc` zip                      |
 
 ## Claude connector (M7)
 

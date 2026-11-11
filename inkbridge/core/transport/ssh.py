@@ -11,13 +11,19 @@ import json
 import shlex
 import tarfile
 
-from .base import RemoteDoc, RmDoc, document_metadata, new_uuid, now_ms, pdf_content
+from .base import RemoteDoc, RmDoc, check_file_name, document_metadata, new_uuid, now_ms, pdf_content
 
 XOCHITL = "/home/root/.local/share/remarkable/xochitl"
 
 
+# Exit code the remote commands use for "no such document or file", so it is not mistaken for an ssh failure.
+MISSING = 44
+
+
 class SshError(RuntimeError):
-    pass
+    def __init__(self, message: str, returncode: int | None = None):
+        super().__init__(message)
+        self.returncode = returncode
 
 
 class SshTransport:
@@ -38,7 +44,7 @@ class SshTransport:
         )
         out, err = await proc.communicate(stdin)
         if proc.returncode != 0:
-            raise SshError(f"ssh {command!r} failed: {err.decode()[:300]}")
+            raise SshError(f"ssh {command!r} failed: {err.decode()[:300]}", proc.returncode)
         return out
 
     async def _all_metadata(self) -> dict[str, dict]:
@@ -115,13 +121,29 @@ class SshTransport:
 
     async def download(self, doc: RemoteDoc) -> RmDoc:
         u = shlex.quote(doc.uuid)
-        out = await self._ssh(f"cd {XOCHITL} && tar -c {u}.* $(test -d {u} && echo {u})")
+        try:
+            out = await self._ssh(f"cd {XOCHITL} && {{ test -f {u}.metadata || exit {MISSING}; }} "
+                                  f"&& tar -c {u}.* $(test -d {u} && echo {u})")
+        except SshError as e:
+            if e.returncode == MISSING:
+                raise FileNotFoundError(f"document {doc.uuid} not found") from e
+            raise
         files = {}
         with tarfile.open(fileobj=io.BytesIO(out)) as tar:
             for m in tar.getmembers():
                 if m.isfile():
                     files[m.name] = tar.extractfile(m).read()
         return RmDoc(uuid=doc.uuid, files=files)
+
+    async def download_file(self, doc_uuid: str, name: str) -> bytes:
+        check_file_name(doc_uuid, name)
+        path = shlex.quote(f"{XOCHITL}/{name}")
+        try:
+            return await self._ssh(f"test -f {path} || exit {MISSING}; cat {path}")
+        except SshError as e:
+            if e.returncode == MISSING:
+                raise FileNotFoundError(f"document {doc_uuid} has no file {name}") from e
+            raise
 
     async def move(self, doc: RemoteDoc, folder: str) -> None:
         folder_uuid = await self.ensure_folder(folder)
