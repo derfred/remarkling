@@ -1,4 +1,5 @@
-"""Document state: doc ID -> source, reMarkable UUID, status, Trilium note ID, feedback.
+"""Document state: doc ID -> source, reMarkable UUID, status, Trilium note ID, feedback; plus a
+key-value cache the transports use for immutable data (see `Store.cache_get_many`).
 
 `Store` is the interface the pipeline uses. Two backends implement it with the same SQL:
 `SQLiteStore` (a file under DATA_DIR; the default, and what tests use) and `PostgresStore`
@@ -15,7 +16,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 if TYPE_CHECKING:
     from ..config import Settings
@@ -43,7 +44,15 @@ CREATE TABLE IF NOT EXISTS docs (
 );
 CREATE INDEX IF NOT EXISTS docs_rm_uuid ON docs(rm_uuid);
 CREATE INDEX IF NOT EXISTS docs_base_id ON docs(base_id);
+CREATE TABLE IF NOT EXISTS cache (
+  key        TEXT PRIMARY KEY,         -- "<namespace>:<id>", e.g. cloud.doc:<doc index hash>
+  value      TEXT NOT NULL,            -- JSON
+  created_at {float} NOT NULL
+);
 """
+
+# Rows per IN (...) list; far below SQLite's and Postgres's parameter limits.
+_CHUNK = 500
 
 
 @dataclass
@@ -87,6 +96,10 @@ class Store(ABC):
         """Run one write statement in its own transaction."""
 
     @abstractmethod
+    def _execute_many(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        """Run one write statement per row, all in one transaction."""
+
+    @abstractmethod
     def close(self) -> None: ...
 
     def mint_id(self) -> str:
@@ -127,6 +140,37 @@ class Store(ABC):
             "SELECT * FROM docs WHERE dir IS NOT NULL AND COALESCE(pulled_at, pushed_at, 0) < ?", (cutoff,)
         )
 
+    # --- cache ------------------------------------------------------------------------------
+    # For values that never change once written (content-addressed blobs), so there is no
+    # invalidation: entries are only added, and dropped by `cache_retain` once unused.
+
+    def cache_get_many(self, keys: Sequence[str]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        keys = list(dict.fromkeys(keys))
+        for i in range(0, len(keys), _CHUNK):
+            chunk = keys[i:i + _CHUNK]
+            marks = ", ".join("?" for _ in chunk)
+            for row in self._fetch(f"SELECT key, value FROM cache WHERE key IN ({marks})", chunk):
+                out[row["key"]] = json.loads(row["value"])
+        return out
+
+    def cache_put_many(self, items: dict[str, Any]) -> None:
+        if items:
+            self._execute_many(
+                "INSERT INTO cache (key, value, created_at) VALUES (?, ?, ?) ON CONFLICT (key) DO NOTHING",
+                [(k, json.dumps(v), now()) for k, v in items.items()],
+            )
+
+    def cache_retain(self, prefix: str, keep: Iterable[str]) -> int:
+        """Delete the entries under `prefix` that are not in `keep`; return how many."""
+        keep = set(keep)
+        stale = [r["key"] for r in self._fetch("SELECT key FROM cache WHERE key LIKE ?", (prefix + "%",))
+                 if r["key"] not in keep]
+        for i in range(0, len(stale), _CHUNK):
+            chunk = stale[i:i + _CHUNK]
+            self._execute(f"DELETE FROM cache WHERE key IN ({', '.join('?' for _ in chunk)})", chunk)
+        return len(stale)
+
     def _one(self, sql: str, params: Sequence[Any]) -> Doc | None:
         rows = self._fetch(sql, params)
         return _row_to_doc(rows[0]) if rows else None
@@ -150,6 +194,10 @@ class SQLiteStore(Store):
     def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         with self._conn:
             self._conn.execute(sql, params)
+
+    def _execute_many(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        with self._conn:
+            self._conn.executemany(sql, rows)
 
     def close(self) -> None:
         self._conn.close()
@@ -176,39 +224,71 @@ class PostgresStore(Store):
     def _connect(self):
         return self._psycopg.connect(self._url, autocommit=True, row_factory=self._row_factory)
 
-    def _run(self, sql: str, params: Sequence[Any], fetch: bool) -> list[dict[str, Any]]:
-        sql = sql.replace("?", "%s")
+    def _run(self, op):
         with self._lock:
             if self._conn.closed:
                 self._conn = self._connect()
             try:
-                cur = self._conn.execute(sql, params)
+                return op(self._conn)
             except self._psycopg.OperationalError:
                 # Stale connection (Postgres restarted, idle timeout): retry once on a fresh one.
-                # Every statement is a single autocommit one, so a retry cannot apply half a write.
+                # Each op is one autocommit statement or one transaction, so a retry cannot apply
+                # half a write.
                 self._conn.close()
                 self._conn = self._connect()
-                cur = self._conn.execute(sql, params)
-            return cur.fetchall() if fetch else []
+                return op(self._conn)
 
     def _fetch(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        return self._run(sql, params, fetch=True)
+        sql = sql.replace("?", "%s")
+        return self._run(lambda conn: conn.execute(sql, params).fetchall())
 
     def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        self._run(sql, params, fetch=False)
+        sql = sql.replace("?", "%s")
+        self._run(lambda conn: conn.execute(sql, params))
+
+    def _execute_many(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
+        sql = sql.replace("?", "%s")
+
+        def op(conn):
+            with conn.transaction(), conn.cursor() as cur:
+                cur.executemany(sql, rows)
+
+        self._run(op)
 
     def close(self) -> None:
         self._conn.close()
 
 
 def open_store(settings: Settings) -> Store:
-    """Postgres when DATABASE_URL is a postgres:// URL, else SQLite at DATA_DIR/inkbridge.sqlite3."""
+    """The store DATABASE_URL names; unset or empty means SQLite at DATA_DIR/inkbridge.sqlite3.
+
+    postgres://... or postgresql://...  Postgres (any libpq URL)
+    sqlite:///relative/path.db           SQLite, relative to the working directory
+    sqlite:////absolute/path.db          SQLite, absolute path (four slashes)
+    sqlite:// or sqlite:///:memory:      SQLite in memory (lost on exit; for tests)
+    """
     url = settings.database_url
+    if not url:
+        return SQLiteStore(settings.db_path)
     if url.startswith(("postgres://", "postgresql://")):
         return PostgresStore(url)
-    if url:
-        raise ValueError(f"DATABASE_URL must be a postgres:// or postgresql:// URL, got {url.split(':')[0]}:")
-    return SQLiteStore(settings.db_path)
+    if url.startswith("sqlite://"):
+        return SQLiteStore(sqlite_path(url))
+    raise ValueError(
+        f"DATABASE_URL must be a postgres://, postgresql:// or sqlite:// URL, got {url.split(':')[0]}:"
+    )
+
+
+def sqlite_path(url: str) -> str:
+    """The file path in a sqlite:// URL (SQLAlchemy's convention), or ":memory:"."""
+    rest = url.removeprefix("sqlite://")
+    if rest in ("", "/:memory:"):
+        return ":memory:"
+    if not rest.startswith("/") or rest == "/":
+        raise ValueError("a sqlite URL is sqlite:///relative/path or sqlite:////absolute/path")
+    if "?" in rest:
+        raise ValueError("sqlite URLs take no query parameters")
+    return rest[1:]
 
 
 def _statements(script: str) -> list[str]:

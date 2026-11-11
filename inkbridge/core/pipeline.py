@@ -61,7 +61,7 @@ class InkBridge:
     @property
     def transport(self) -> Transport:
         if self._transport is None:
-            self._transport = make_transport(self.settings)
+            self._transport = make_transport(self.settings, cache=self.store)
         return self._transport
 
     @property

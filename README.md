@@ -21,7 +21,7 @@ inkbridge/
     overlay.py     # rmscene -> annotated.pdf + 2x PNG, highlights, ink bands
     interpret.py   # 1,400 px strips, 15% overlap, inked strips only -> Claude -> merged feedback
     trilium.py     # ETAPI note per doc; re-pull updates in place
-    store.py       # doc state: SQLiteStore (default) or PostgresStore (DATABASE_URL)
+    store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
     pipeline.py    # push_document(), poll_outbox()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
   api.py           # FastAPI /push /poll /healthz + MCP at /mcp, bearer-token auth
@@ -46,9 +46,9 @@ uv run pytest
 Add or bump dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit `uv.lock`.
 
 Configuration is environment-only; see `inkbridge/config.py` and `.env.example`.
-The cloud transport caches index and metadata blobs under `$DATA_DIR/cloud-cache/` (blobs are
-immutable, so the cache never goes stale and is safe to delete) and reuses the last listing while the
-root hash is unchanged. An idle poll is a single `GET /sync/v4/root`; hence the 60 s default for
+The cloud transport caches index and metadata blobs in the document store (see Deploy; blobs are
+immutable, so the cache never goes stale and its rows are safe to delete) and reuses the last listing
+while the root hash is unchanged. An idle poll is a single `GET /sync/v4/root`; hence the 60 s default for
 `POLL_INTERVAL_S`.
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
@@ -110,10 +110,21 @@ serialised by an asyncio lock in-process and a file lock on the volume across co
 files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store. The public hostname
 needs a DNS record pointing at the cluster's ingress.
 
-Document state (doc IDs, reMarkable UUIDs, status, Trilium links, feedback JSON) lives in SQLite at
-`DATA_DIR/inkbridge.sqlite3` unless `DATABASE_URL` is a `postgres://` URL, in which case the `docs`
-table is created there on start. The PVC is still needed either way: it holds the rendered and
-annotated files and the cross-container poll lock. Switching does not migrate existing rows.
+Document state (doc IDs, reMarkable UUIDs, status, Trilium links, feedback JSON) lives in the
+database `DATABASE_URL` names; its tables are created on start:
+
+| `DATABASE_URL`                          | Store                                         |
+| --------------------------------------- | --------------------------------------------- |
+| unset or empty                          | SQLite at `DATA_DIR/inkbridge.sqlite3`        |
+| `sqlite:///relative/path.db`            | SQLite, relative to the working directory     |
+| `sqlite:////absolute/path.db`           | SQLite, absolute path (four slashes)          |
+| `postgresql://user:pass@host:5432/db`   | Postgres (`postgres://` too; libpq options as query parameters) |
+
+The same store also holds a `cache` table: the cloud transport keeps the root, document index,
+metadata and content blobs there, keyed by hash and pruned to what the current root references, so
+the server and poller share them and a restart does not refetch the whole library. The PVC is still needed either way: it
+holds the rendered and annotated files and the cross-container poll lock, and a SQLite file must
+sit on it too so both containers see the same one. Switching does not migrate existing rows.
 
 ## iPhone Shortcuts (M6)
 

@@ -13,14 +13,12 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import struct
 from dataclasses import dataclass
-from pathlib import Path
 
 import httpx
 
-from .base import RemoteDoc, RmDoc, document_metadata, new_uuid, now_ms, pdf_content
+from .base import Cache, RemoteDoc, RmDoc, document_metadata, new_uuid, now_ms, pdf_content
 
 log = logging.getLogger(__name__)
 
@@ -128,41 +126,58 @@ async def register_device(code: str, auth_host: str) -> str:
         return r.text.strip()
 
 
-# Index and metadata blobs: small, fetched on every listing, worth keeping on disk.
+# Index and metadata blobs: small, fetched on every listing, worth caching.
 # Payloads (.pdf, .rm, ...) are fetched once per document and the pipeline keeps its own copy.
 _CACHED_SUFFIXES = (".docSchema", ".metadata", ".content")
+# Key prefix of cached blobs in the document store's cache table.
+CACHE_PREFIX = "cloud.blob:"
 
 
 class BlobCache:
-    """Blobs on disk, keyed by hash. A blob never changes once stored, so entries never go stale.
+    """Blobs keyed by hash, in the document store (SQLite or Postgres), which the server and the
+    poller share and which survives restarts. A blob never changes once stored, so entries never
+    go stale; `retain` drops the ones the current root no longer references.
 
-    Writes are atomic (temp file + rename) because the server and the poller share the directory.
+    The cache only saves requests: if the store fails, callers fall back to the cloud.
     """
 
-    def __init__(self, path: Path | None):
-        self.path = path
-        if path is not None:
-            path.mkdir(parents=True, exist_ok=True)
+    def __init__(self, store: Cache | None):
+        self.store = store
+        self._prefetched: dict[str, bytes] = {}
 
-    def _file(self, h: str) -> Path | None:
-        if self.path is None or not h or not all(c in "0123456789abcdef" for c in h):
-            return None
-        return self.path / h
+    def _call(self, what: str, fn, default=None):
+        if self.store is None:
+            return default
+        try:
+            return fn(self.store)
+        except Exception:
+            log.warning("blob cache %s failed; continuing without it", what, exc_info=True)
+            return default
+
+    def prefetch(self, hashes: list[str]) -> None:
+        """Load many blobs with one query, so a listing does not cost a query per blob."""
+        missing = [h for h in hashes if h not in self._prefetched]
+        if missing:
+            found = self._call("read", lambda s: s.cache_get_many([CACHE_PREFIX + h for h in missing]), {})
+            for key, value in found.items():
+                self._prefetched[key.removeprefix(CACHE_PREFIX)] = base64.b64decode(value)
+
+    def peek(self, h: str) -> bytes | None:
+        return self._prefetched.get(h)
 
     def get(self, h: str) -> bytes | None:
-        f = self._file(h)
-        try:
-            return f.read_bytes() if f else None
-        except FileNotFoundError:
-            return None
+        if h in self._prefetched:
+            return self._prefetched.pop(h)
+        found = self._call("read", lambda s: s.cache_get_many([CACHE_PREFIX + h]), {})
+        value = found.get(CACHE_PREFIX + h)
+        return base64.b64decode(value) if value is not None else None
 
     def put(self, h: str, data: bytes) -> None:
-        f = self._file(h)
-        if f is None or f.exists():
-            return
-        tmp = f.with_name(f"{f.name}.{os.getpid()}.tmp")
-        tmp.write_bytes(data)
-        os.replace(tmp, f)
+        self._call("write", lambda s: s.cache_put_many({CACHE_PREFIX + h: base64.b64encode(data).decode()}))
+
+    def retain(self, hashes: set[str]) -> None:
+        self._prefetched.clear()
+        self._call("prune", lambda s: s.cache_retain(CACHE_PREFIX, {CACHE_PREFIX + h for h in hashes}))
 
 
 class CloudTransport:
@@ -172,7 +187,7 @@ class CloudTransport:
         auth_host: str,
         sync_host: str,
         client: httpx.AsyncClient | None = None,
-        cache_dir: Path | None = None,
+        cache: Cache | None = None,
     ):
         if not device_token:
             raise CloudError("RM_DEVICE_TOKEN is not set; run `inkbridge register <code>` first")
@@ -182,7 +197,7 @@ class CloudTransport:
         self.client = client or httpx.AsyncClient(timeout=60)
         self._user_token: str | None = None
         self._lock = asyncio.Lock()
-        self.cache = BlobCache(cache_dir)
+        self.cache = BlobCache(cache)
         # doc index hash -> (index, metadata) for the entries of the last listed root.
         self._doc_cache: dict[str, tuple[Index, dict]] = {}
         # (root hash, live entries with metadata): an unchanged root needs no blob fetches at all.
@@ -280,11 +295,23 @@ class CloudTransport:
         self._doc_cache[entry.hash] = (index, meta)
         return index, meta
 
+    def _prefetch(self, entries: list[Entry]) -> None:
+        """Load the cached index, then metadata, blobs of entries not in memory: two queries in all."""
+        missing = [e for e in entries if e.hash not in self._doc_cache]
+        self.cache.prefetch([e.hash for e in missing])
+        meta_hashes = []
+        for e in missing:
+            data = self.cache.peek(e.hash)
+            if data is not None:
+                meta_hashes += [f.hash for f in Index.parse(data).entries if f.id.endswith(".metadata")]
+        self.cache.prefetch(meta_hashes)
+
     async def _all_docs(self, root_hash: str, root: Index) -> list[tuple[Entry, dict]]:
         if self._listing and self._listing[0] == root_hash:
             log.debug("root %s unchanged, reusing listing", root_hash[:12])
             return self._listing[1]
         fetches = self.blob_fetches
+        self._prefetch(root.entries)
         sem = asyncio.Semaphore(8)
 
         async def one(e: Entry):
@@ -294,9 +321,14 @@ class CloudTransport:
 
         # Every root entry is a document or folder; v4 roots may type them "0" instead of DOC_TYPE.
         results = await asyncio.gather(*(one(e) for e in root.entries))
-        # Keep only the current entries so the memo doesn't grow with every edit.
+        # Keep only the current entries so neither the memo nor the store grows with every edit.
+        # A concurrent lister on a newer root may lose blobs it just cached; it refetches them.
         current = {e.hash for e in root.entries}
         self._doc_cache = {h: v for h, v in self._doc_cache.items() if h in current}
+        live = {root_hash} | current
+        for index, _ in self._doc_cache.values():
+            live |= {f.hash for f in index.entries if f.id.endswith(_CACHED_SUFFIXES)}
+        self.cache.retain(live)
         docs = [(e, m) for e, m in results if not m.get("deleted") and m.get("parent") != "trash"]
         self._listing = (root_hash, docs)
         log.info("listed root %s: %d entries, %d blobs fetched", root_hash[:12], len(root.entries), self.blob_fetches - fetches)

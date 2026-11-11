@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from ...config import Settings
-from .base import RemoteDoc, RmDoc, Transport
+from .base import Cache, RemoteDoc, RmDoc, Transport
 
 
-def make_transport(settings: Settings) -> Transport:
+def make_transport(settings: Settings, cache: Cache | None = None) -> Transport:
     if settings.rm_transport == "ssh":
         from .ssh import SshTransport
 
@@ -12,13 +12,8 @@ def make_transport(settings: Settings) -> Transport:
     if settings.rm_transport == "cloud":
         from .cloud import CloudTransport
 
-        return CloudTransport(
-            settings.rm_device_token,
-            settings.rm_auth_host,
-            settings.rm_sync_host,
-            cache_dir=settings.data_dir / "cloud-cache",
-        )
+        return CloudTransport(settings.rm_device_token, settings.rm_auth_host, settings.rm_sync_host, cache=cache)
     raise ValueError(f"unknown RM_TRANSPORT {settings.rm_transport!r}")
 
 
-__all__ = ["RemoteDoc", "RmDoc", "Transport", "make_transport"]
+__all__ = ["Cache", "RemoteDoc", "RmDoc", "Transport", "make_transport"]

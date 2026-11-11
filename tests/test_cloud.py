@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from inkbridge.core.transport.cloud import CloudTransport, Entry, Index, crc32c, sha256
+from inkbridge.core.store import SQLiteStore
 from rmfixtures import sample_pdf
 
 
@@ -154,10 +155,15 @@ def _counting(fake):
     return seen, httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
-async def test_unchanged_root_costs_one_request(tmp_path):
+def _transport(fake, store=None, client=None):
+    client = client or httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+    return CloudTransport("device", "https://auth.test", "https://sync.test", client=client, cache=store)
+
+
+async def test_unchanged_root_costs_one_request():
     fake = FakeCloud()
     seen, client = _counting(fake)
-    t = CloudTransport("device", "https://auth.test", "https://sync.test", client=client, cache_dir=tmp_path)
+    t = _transport(fake, SQLiteStore(":memory:"), client)
     u = await t.upload_pdf(sample_pdf(), "Spec", "Outbox")
     await t.list_folder("Outbox")
 
@@ -166,29 +172,29 @@ async def test_unchanged_root_costs_one_request(tmp_path):
     assert seen == [("GET", "/sync/v4/root")]
 
 
-async def test_restart_reads_indexes_from_disk_cache(tmp_path):
-    fake = FakeCloud()
-    first = CloudTransport("device", "https://auth.test", "https://sync.test",
-                           client=httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)), cache_dir=tmp_path)
+async def test_restart_reads_indexes_from_the_store():
+    fake, store = FakeCloud(), SQLiteStore(":memory:")
+    first = _transport(fake, store)
     u = await first.upload_pdf(sample_pdf(), "Spec", "Outbox")
 
+    # A new process (restart, or the other container) sharing the store.
     seen, client = _counting(fake)
-    second = CloudTransport("device", "https://auth.test", "https://sync.test", client=client, cache_dir=tmp_path)
+    reads = []
+    get_many = store.cache_get_many
+    store.cache_get_many = lambda keys: reads.append(len(keys)) or get_many(keys)
+    second = _transport(fake, store, client)
     assert [d.uuid for d in await second.list_folder("Outbox")] == [u]
     assert [p for m, p in seen if p.startswith("/sync/v3/files/")] == []
+    # Root index, then the doc indexes in one batch, then their metadata in one batch.
+    assert len(reads) == 3
     # Payloads are not cached: a download still goes to the cloud.
     assert (await second.download((await second.list_folder("Outbox"))[0])).pdf
     assert any(p.startswith("/sync/v3/files/") for m, p in seen)
 
 
-async def test_changed_root_fetches_only_changed_entries(tmp_path):
+async def test_changed_root_fetches_only_changed_entries():
     fake = FakeCloud()
-
-    def transport(cache):
-        client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
-        return CloudTransport("device", "https://auth.test", "https://sync.test", client=client, cache_dir=cache)
-
-    ours, tablet = transport(tmp_path / "ours"), transport(tmp_path / "tablet")
+    ours, tablet = _transport(fake, SQLiteStore(":memory:")), _transport(fake, SQLiteStore(":memory:"))
     for i in range(3):
         await ours.upload_pdf(sample_pdf(), f"Spec {i}", "Outbox")
     docs = await ours.list_folder("Outbox")
@@ -200,3 +206,31 @@ async def test_changed_root_fetches_only_changed_entries(tmp_path):
     assert len(await ours.list_folder("Outbox")) == 2
     # New root index + the moved doc's index and metadata + the new folder's index and metadata.
     assert ours.blob_fetches - before == 5
+
+
+async def test_store_keeps_only_blobs_of_the_current_root():
+    fake, store = FakeCloud(), SQLiteStore(":memory:")
+    t = _transport(fake, store)
+    await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    await t.move((await t.list_folder("Inbox"))[0], "Outbox")
+    await t.list_folder("Outbox")
+
+    root_hash, _, root = await t.get_root()
+    live = {root_hash}
+    for e in root.entries:
+        live.add(e.hash)
+        live |= {f.hash for f in Index.parse(fake.blobs[e.hash]).entries if f.id.endswith((".metadata", ".content"))}
+    assert {r["key"] for r in store._fetch("SELECT key FROM cache")} == {"cloud.blob:" + h for h in live}
+
+
+async def test_cache_failure_falls_back_to_the_cloud():
+    class Broken:
+        def __getattr__(self, name):
+            def fail(*a, **kw):
+                raise RuntimeError("db down")
+            return fail
+
+    fake = FakeCloud()
+    t = _transport(fake, Broken())
+    u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    assert [d.uuid for d in await t.list_folder("Inbox")] == [u]

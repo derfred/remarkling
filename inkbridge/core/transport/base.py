@@ -8,7 +8,7 @@ import time
 import uuid as uuid_lib
 import zipfile
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Iterable, Protocol, Sequence
 
 
 @dataclass
@@ -78,6 +78,16 @@ class RmDoc:
         if meta is None:
             raise ValueError("not an .rmdoc: no .metadata file")
         return cls(uuid=meta.removesuffix(".metadata"), files=files)
+
+
+class Cache(Protocol):
+    """Shared, persistent cache for immutable values (implemented by `Store`). Values are JSON."""
+
+    def cache_get_many(self, keys: Sequence[str]) -> dict[str, Any]: ...
+
+    def cache_put_many(self, items: dict[str, Any]) -> None: ...
+
+    def cache_retain(self, prefix: str, keep: Iterable[str]) -> int: ...
 
 
 class Transport(Protocol):

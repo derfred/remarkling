@@ -49,7 +49,8 @@ class Settings:
     # An idle poll is one GET of the root pointer (listings and index blobs are cached), so poll often.
     poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "60")))
     data_dir: Path = field(default_factory=lambda: Path(_env("DATA_DIR", "./data")))
-    # postgres://user:pass@host/db to keep document state in Postgres; empty means SQLite in DATA_DIR.
+    # Document store: postgres://user:pass@host/db, sqlite:///relative.db or sqlite:////abs/path.db.
+    # Empty means SQLite at DATA_DIR/inkbridge.sqlite3. See store.open_store().
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL"))
     retention_days: int = field(default_factory=lambda: int(_env("RETENTION_DAYS", "30")))
 
