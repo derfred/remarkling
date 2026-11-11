@@ -45,13 +45,22 @@
   // keys of the same name in `secretName`.
   env: {},
 
-  // Rendered documents, the poll lock, and SQLite when `database` is null.
-  // ReadWriteOnce, hence one pod and the Recreate strategy. The storage class
-  // can't change once the claim exists.
+  // DATA_DIR: rendered documents (original/annotated PDFs, the page strips
+  // get_annotations returns as images), the lock the two containers poll
+  // under, and the SQLite file when `database` is null.
+  //
+  // By default an emptyDir: with Postgres, nothing on it has to outlive the
+  // pod. A restart only drops the files, so get_annotations then returns the
+  // feedback of earlier documents without their strip images.
+  //
+  // persistent: true makes it a PersistentVolumeClaim `claimName` instead,
+  // which SQLite needs. ReadWriteOnce, hence one pod and the Recreate strategy;
+  // the storage class can't change once the claim exists.
   storage: {
+    persistent: false,
+    size: '1Gi',  // emptyDir sizeLimit, or the claim's request
     claimName: 'remarkling-data',
-    size: '1Gi',
-    storageClass: 'longhorn',
+    storageClass: null,  // null: the cluster's default class
   },
 
   resources: {
