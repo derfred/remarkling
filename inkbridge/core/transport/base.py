@@ -105,6 +105,11 @@ class Transport(Protocol):
 
     async def aclose(self) -> None: ...
 
+    # Optional: a transport that can push change notifications also implements
+    #     def notifications(self) -> AbstractAsyncContextManager[AsyncIterator[dict]]
+    # entered once connected, yielding one dict per remote change and ending when the connection
+    # drops. The poller wakes on them; without it, it polls on a timer.
+
 
 def new_uuid() -> str:
     return str(uuid_lib.uuid4())

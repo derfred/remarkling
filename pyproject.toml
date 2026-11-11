@@ -18,6 +18,7 @@ dependencies = [
   "python-multipart>=0.0.9",
   "rmscene==0.8.0",
   "uvicorn[standard]>=0.29",
+  "websockets>=13",  # cloud notifications (the poller); also pulled in by uvicorn[standard]
 ]
 
 [dependency-groups]

@@ -12,7 +12,13 @@ def make_transport(settings: Settings, cache: Cache | None = None) -> Transport:
     if settings.rm_transport == "cloud":
         from .cloud import CloudTransport
 
-        return CloudTransport(settings.rm_device_token, settings.rm_auth_host, settings.rm_sync_host, cache=cache)
+        return CloudTransport(
+            settings.rm_device_token,
+            settings.rm_auth_host,
+            settings.rm_sync_host,
+            cache=cache,
+            notifications_url=settings.rm_notifications_url,
+        )
     raise ValueError(f"unknown RM_TRANSPORT {settings.rm_transport!r}")
 
 

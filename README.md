@@ -27,7 +27,7 @@ inkbridge/
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
   api.py           # FastAPI /push /poll /healthz, /api/cache, /ui + MCP at /mcp, bearer-token auth
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
-  poller.py        # poll_outbox() every POLL_INTERVAL_S
+  poller.py        # poll_outbox() on cloud websocket notifications (timer fallback)
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
 web/               # cache explorer UI: Svelte 5 + Tailwind CSS 4, built by Vite into inkbridge/web
 prompts/interpret.md
@@ -52,8 +52,14 @@ Add or bump dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commi
 Configuration is environment-only; see `inkbridge/config.py` and `.env.example`.
 The cloud transport caches index and metadata blobs in the document store (see Deploy; blobs are
 immutable, so the cache never goes stale and its rows are safe to delete) and reuses the last listing
-while the root hash is unchanged. An idle poll is a single `GET /sync/v4/root`; hence the 60 s default for
-`POLL_INTERVAL_S`.
+while the root hash is unchanged. An idle poll is a single `GET /sync/v4/root`.
+
+The poller does not poll on a timer when it can avoid it. It holds the cloud's notifications
+websocket open (`wss://<RM_SYNC_HOST>/notifications/ws/json/1`, override with `RM_NOTIFICATIONS_URL`).
+Every sync, including the tablet's, sends a message there, and each message triggers a
+`poll_outbox()` after a 2 s debounce. A reconnect also triggers one, to catch up on anything missed. While the
+socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket (SSH transport,
+`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
@@ -68,6 +74,11 @@ These are assumptions the code makes that only the real tablet and cloud can con
 - **Cloud protocol.** `cloud.py` follows the rmapi sync15 flow (`/sync/v4/root`, `/sync/v3/files`,
   generation-checked root swap). Hosts are `RM_AUTH_HOST` / `RM_SYNC_HOST`. If the account uses a
   different schema or host, fix it there; `RM_TRANSPORT=ssh` is the fallback.
+- **Notifications websocket.** The endpoint (`/notifications/ws/json/1` on the sync host, bearer
+  user token) and message shape (`{"message": {"attributes": {"event": "SyncComplete", ...}}}`)
+  come from rmapi/rmfakecloud. Annotate a page and move it to Outbox, then check that the poller logs
+  `notification SyncComplete` within seconds. If it logs `notifications unavailable`, set
+  `RM_NOTIFICATIONS_URL` to the right host, or to `off` to go back to plain polling.
 - **Fixtures.** Tests use synthetic `.rm` pages built with rmscene (`tests/rmfixtures.py`). Add the
   three hand-annotated `.rmdoc` exports to `tests/fixtures/` once M0 works.
 

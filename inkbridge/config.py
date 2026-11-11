@@ -46,8 +46,14 @@ class Settings:
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
     )
-    # An idle poll is one GET of the root pointer (listings and index blobs are cached), so poll often.
+    # The poller wakes on the cloud's notifications websocket (one message per sync). Empty derives
+    # wss://<sync host>/notifications/ws/json/1; "off" disables it and the poller just polls.
+    rm_notifications_url: str = field(default_factory=lambda: _env("RM_NOTIFICATIONS_URL"))
+    # Poll interval while there is no websocket (SSH transport, "off", or disconnected). An idle poll
+    # is one GET of the root pointer (listings and index blobs are cached), so poll often.
     poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "60")))
+    # Safety-net poll while the websocket is up, in case a notification is lost.
+    poll_fallback_s: int = field(default_factory=lambda: int(_env("POLL_FALLBACK_S", "900")))
     data_dir: Path = field(default_factory=lambda: Path(_env("DATA_DIR", "./data")))
     # Document store: postgres://user:pass@host/db, sqlite:///relative.db or sqlite:////abs/path.db.
     # Empty means SQLite at DATA_DIR/inkbridge.sqlite3. See store.open_store().

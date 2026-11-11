@@ -3,6 +3,8 @@
 The protocol is unofficial. Storage is a content-addressed blob store: a root index lists one
 entry per document, each document index lists its files (.metadata, .content, .pdf, page .rm
 files). Writing means uploading new blobs, then swapping the root hash with a generation check.
+A root swap with `broadcast: true` makes the cloud send a "SyncComplete" message to every client
+on the notifications websocket, which is how the poller learns that the tablet has synced.
 Hosts and index details are the parts most likely to change; verify them during M0.
 """
 
@@ -14,9 +16,13 @@ import hashlib
 import json
 import logging
 import struct
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
+from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed, InvalidStatus
 
 from .base import Cache, RemoteDoc, RmDoc, document_metadata, new_uuid, now_ms, pdf_content
 
@@ -131,6 +137,30 @@ async def register_device(code: str, auth_host: str) -> str:
 _CACHED_SUFFIXES = (".docSchema", ".metadata", ".content")
 # Key prefix of cached blobs in the document store's cache table.
 CACHE_PREFIX = "cloud.blob:"
+NOTIFICATIONS_PATH = "/notifications/ws/json/1"
+
+
+def default_notifications_url(sync_host: str) -> str:
+    """wss://<sync host>/notifications/ws/json/1, the endpoint rmapi and rmfakecloud use."""
+    host = sync_host.rstrip("/")
+    for http, ws in (("https://", "wss://"), ("http://", "ws://")):
+        if host.startswith(http):
+            return ws + host.removeprefix(http) + NOTIFICATIONS_PATH
+    return host + NOTIFICATIONS_PATH
+
+
+def parse_notification(raw: str | bytes) -> dict:
+    """The attributes of a notification: {"event": "SyncComplete", "sourceDeviceID": ..., ...}.
+
+    Messages look like {"message": {"attributes": {...}, "messageId": ..., "publishTime": ...},
+    "subscription": ...}. Anything else still counts as "something changed", so it parses to {}.
+    """
+    try:
+        msg = json.loads(raw)
+        attrs = msg.get("message", {}).get("attributes", {})
+        return dict(attrs) if isinstance(attrs, dict) else {}
+    except (ValueError, AttributeError):
+        return {}
 
 
 class BlobCache:
@@ -188,12 +218,15 @@ class CloudTransport:
         sync_host: str,
         client: httpx.AsyncClient | None = None,
         cache: Cache | None = None,
+        notifications_url: str = "",
     ):
         if not device_token:
             raise CloudError("RM_DEVICE_TOKEN is not set; run `inkbridge register <code>` first")
         self.device_token = device_token
         self.auth_host = auth_host.rstrip("/")
         self.sync_host = sync_host.rstrip("/")
+        # "" derives the URL from the sync host; "off" disables notifications.
+        self.notifications_url = notifications_url or default_notifications_url(self.sync_host)
         self.client = client or httpx.AsyncClient(timeout=60)
         self._user_token: str | None = None
         self._lock = asyncio.Lock()
@@ -230,6 +263,51 @@ class CloudTransport:
                 continue
             return r
         return r
+
+    @property
+    def notifications_enabled(self) -> bool:
+        return self.notifications_url.lower() not in ("off", "none", "false", "0")
+
+    async def _connect_notifications(self) -> ClientConnection:
+        token = self._user_token or await self._refresh_user_token()
+        for attempt in range(2):
+            try:
+                return await connect(
+                    self.notifications_url,
+                    additional_headers={"Authorization": f"Bearer {token}"},
+                    open_timeout=30,
+                    max_size=2**20,
+                )
+            except InvalidStatus as e:
+                status = e.response.status_code
+                if status == 401 and attempt == 0:
+                    token = await self._refresh_user_token()
+                    continue
+                raise CloudError(f"notifications websocket: {status}") from e
+        raise AssertionError("unreachable")
+
+    @asynccontextmanager
+    async def notifications(self) -> AsyncIterator[AsyncIterator[dict]]:
+        """Connect to the notifications websocket; yield an iterator over its messages' attributes.
+
+        The iterator ends when the connection closes (the caller reconnects). Pings keep the
+        connection alive and detect a dead one.
+        """
+        if not self.notifications_enabled:
+            raise CloudError("notifications are disabled (RM_NOTIFICATIONS_URL=off)")
+        ws = await self._connect_notifications()
+
+        async def events() -> AsyncIterator[dict]:
+            try:
+                async for raw in ws:
+                    yield parse_notification(raw)
+            except ConnectionClosed as e:
+                log.info("notifications websocket closed: %s", e)
+
+        try:
+            yield events()
+        finally:
+            await ws.close()
 
     async def get_blob(self, h: str, filename: str) -> bytes:
         cacheable = filename.endswith(_CACHED_SUFFIXES)

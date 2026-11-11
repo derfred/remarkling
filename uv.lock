@@ -463,6 +463,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "rmscene" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -487,6 +488,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "rmscene", specifier = "==0.8.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
+    { name = "websockets", specifier = ">=13" },
 ]
 
 [package.metadata.requires-dev]
