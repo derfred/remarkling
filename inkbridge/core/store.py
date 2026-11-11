@@ -171,6 +171,13 @@ class Store(ABC):
             self._execute(f"DELETE FROM cache WHERE key IN ({', '.join('?' for _ in chunk)})", chunk)
         return len(stale)
 
+    def cache_rows(self, prefix: str = "") -> list[dict[str, Any]]:
+        """Every entry under `prefix` as {key, value (raw JSON text), created_at}, for inspection."""
+        return self._fetch("SELECT key, value, created_at FROM cache WHERE key LIKE ? ORDER BY key", (prefix + "%",))
+
+    def with_rm_uuid(self) -> list[Doc]:
+        return self._many("SELECT * FROM docs WHERE rm_uuid IS NOT NULL ORDER BY doc_id", ())
+
     def _one(self, sql: str, params: Sequence[Any]) -> Doc | None:
         rows = self._fetch(sql, params)
         return _row_to_doc(rows[0]) if rows else None

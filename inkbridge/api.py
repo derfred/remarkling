@@ -4,20 +4,24 @@ from __future__ import annotations
 
 import hmac
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from pathlib import PurePath
 from urllib.parse import parse_qs
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings
+from .core.explorer import KINDS, CacheSnapshot
 from .core.pipeline import get_bridge
 from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
+# Served without a token: the page holds no data and asks for the API token itself.
+PUBLIC_PATHS = {"/healthz", "/", "/ui", "/ui/"}
 
 
 class TokenAuth:
@@ -27,7 +31,7 @@ class TokenAuth:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["path"] == "/healthz":
+        if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
             return await self.app(scope, receive, send)
         settings = get_settings()
         is_mcp = scope["path"].startswith("/mcp")
@@ -109,6 +113,52 @@ def create_app() -> ASGIApp:
             else:
                 raise HTTPException(415, f"unsupported file type {ctype or suffix}")
         return {"doc_id": result.doc_id, "title": result.title}
+
+    # --- cache explorer: read-only REST API under /api/cache, web UI at /ui ---------------------
+
+    def snapshot() -> CacheSnapshot:
+        return CacheSnapshot(get_bridge().store)
+
+    @app.get("/api/cache")
+    def cache_summary():
+        return snapshot().summary()
+
+    @app.get("/api/cache/library")
+    def cache_library():
+        return {"items": snapshot().library()}
+
+    @app.get("/api/cache/library/{uuid}")
+    def cache_node(uuid: str):
+        detail = snapshot().node_detail(uuid)
+        if detail is None:
+            raise HTTPException(404, "not in the cached library")
+        return detail
+
+    @app.get("/api/cache/blobs")
+    def cache_blobs(
+        kind: str | None = Query(None, pattern="^(" + "|".join(KINDS) + ")$"),
+        q: str = "",
+        limit: int = Query(100, ge=1, le=1000),
+        offset: int = Query(0, ge=0),
+    ):
+        return snapshot().blob_list(kind, q, limit, offset)
+
+    @app.get("/api/cache/blobs/{key:path}")
+    def cache_blob(key: str):
+        detail = snapshot().blob_detail(key)
+        if detail is None:
+            raise HTTPException(404, "no such cache entry")
+        return detail
+
+    ui_html = files("inkbridge").joinpath("web/index.html").read_text()
+
+    @app.get("/", include_in_schema=False)
+    async def index():
+        return RedirectResponse("/ui")
+
+    @app.get("/ui", include_in_schema=False)
+    async def ui():
+        return HTMLResponse(ui_html, headers={"Cache-Control": "no-cache"})
 
     app.mount("/", mcp_app)
     return TokenAuth(app)
