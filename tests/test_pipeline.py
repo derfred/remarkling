@@ -88,3 +88,20 @@ async def test_failed_archive_move_is_retried_without_reprocessing(bridge):
     assert await bridge.poll_outbox() == []
     assert len(await t.list_folder("Archive")) == 1
     assert bridge._interpreter.calls == 1
+
+
+async def test_notebooks_in_outbox_are_processed(bridge):
+    from rmscene import scene_items as si
+
+    from inkbridge.core.transport.base import RemoteDoc
+    from rmfixtures import notebook, page_text
+
+    t = bridge.transport
+    doc = notebook([rm_page([line([(0, 300), (10, 310)])],
+                            text=page_text([(si.ParagraphStyle.PLAIN, "Typed on the tablet")]))])
+    t.docs[doc.uuid] = (RemoteDoc(doc.uuid, "Notes", "Outbox", version="v1"), doc)
+    pulled = await bridge.poll_outbox()
+    assert len(pulled) == 1 and pulled[0].external
+    stored = bridge.store.get(pulled[0].doc_id)
+    assert stored.status == "pulled" and t.docs[doc.uuid][0].parent == "Archive"
+    assert (stored.path / "original.pdf").exists() and list(stored.path.glob("strip-*.png"))

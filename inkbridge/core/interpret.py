@@ -55,7 +55,7 @@ def has_ink(top: int, bottom: int, ink_bands: list[tuple[int, int]]) -> bool:
     return any(a < bottom and b > top for a, b in ink_bands)
 
 
-def slice_strips(result: OverlayResult, original_pdf: bytes) -> list[Strip]:
+def slice_strips(result: OverlayResult, original_pdf: bytes | None = None) -> list[Strip]:
     image = Image.open(io.BytesIO(result.png))
     strips = []
     for i, (top, bottom) in enumerate(strip_ranges(image.height)):
@@ -67,12 +67,17 @@ def slice_strips(result: OverlayResult, original_pdf: bytes) -> list[Strip]:
     return strips
 
 
-def _context(result: OverlayResult, original_pdf: bytes, top: int, bottom: int) -> str:
+def _context(result: OverlayResult, original_pdf: bytes | None, top: int, bottom: int) -> str:
+    # text_pdf has one page per rendered page, so it stays aligned when pages were added or
+    # deleted on the tablet, and it holds typed text; the original PDF is the fallback.
+    source = result.text_pdf or original_pdf
+    if not source:
+        return ""
     parts = []
     for page_index, (ptop, ph) in enumerate(result.page_bands):
         a, b = max(top, ptop), min(bottom, ptop + ph)
         if a < b:
-            parts.append(page_text(original_pdf, page_index, (a - ptop) / PNG_SCALE, (b - ptop) / PNG_SCALE))
+            parts.append(page_text(source, page_index, (a - ptop) / PNG_SCALE, (b - ptop) / PNG_SCALE))
     return "\n".join(p for p in parts if p)
 
 
@@ -177,7 +182,7 @@ class Interpreter:
         )
         return reply.strip()
 
-    async def interpret(self, result: OverlayResult, original_pdf: bytes, title: str) -> dict[str, Any]:
+    async def interpret(self, result: OverlayResult, original_pdf: bytes | None, title: str) -> dict[str, Any]:
         strips = slice_strips(result, original_pdf)
         results = await asyncio.gather(*(self.interpret_strip(s, title, result.pen_colors) for s in strips))
         marks, notes, summaries = merge_strips(list(results))

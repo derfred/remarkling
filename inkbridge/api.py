@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import mimetypes
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePath
 from urllib.parse import parse_qs, quote
@@ -18,6 +20,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .config import get_settings
 from .core.explorer import KINDS, CacheSnapshot
 from .core.pipeline import get_bridge
+from .core.renderer import PageNotFound, Renderer
 from .core.transport.base import RemoteDoc
 from .mcp_server import mcp
 
@@ -84,14 +87,46 @@ def download_name(visible_name: str, doc_uuid: str, name: str) -> str:
     return base + rest
 
 
-def file_response(data: bytes, filename: str) -> Response:
+def file_response(data: bytes, filename: str, inline: bool = False, cache: str = "private, no-store") -> Response:
     suffix = PurePath(filename).suffix.lower()
     ctype = FILE_TYPES.get(suffix) or mimetypes.guess_type(filename)[0] or "application/octet-stream"
     # filename= for old clients (ASCII only), filename*= (RFC 6266) for the real name.
     ascii_name = filename.encode("ascii", "replace").decode().replace("?", "_").replace('"', "_")
-    disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename, safe='')}"
-    return Response(data, media_type=ctype, headers={"Content-Disposition": disposition,
-                                                    "Cache-Control": "private, no-store"})
+    disposition = (f"{'inline' if inline else 'attachment'}; filename=\"{ascii_name}\"; "
+                   f"filename*=UTF-8''{quote(filename, safe='')}")
+    return Response(data, media_type=ctype, headers={"Content-Disposition": disposition, "Cache-Control": cache})
+
+
+class RenderCache:
+    """Renderers of recently viewed documents, so a page of previews downloads the document once.
+
+    Entries live `ttl` seconds: previews may lag the tablet by that much. Full downloads bypass it.
+    """
+
+    def __init__(self, ttl: float = 120, size: int = 4):
+        self.ttl, self.size = ttl, size
+        self._items: dict[str, tuple[float, Renderer]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    async def get(self, uuid: str, fresh: bool = False) -> Renderer:
+        lock = self._locks.setdefault(uuid, asyncio.Lock())
+        async with lock:  # concurrent previews of one document share one download
+            hit = self._items.get(uuid)
+            if hit and not fresh and hit[0] > time.monotonic():
+                return hit[1]
+            try:
+                rmdoc = await get_bridge().transport.download(RemoteDoc(uuid, "", ""))
+            except FileNotFoundError as e:
+                raise HTTPException(404, "no such document") from e
+            rm_width = get_settings().rm_page_width_units
+            renderer = await asyncio.to_thread(Renderer, rmdoc, rm_width)
+            self._items.pop(uuid, None)
+            self._items[uuid] = (time.monotonic() + self.ttl, renderer)
+            while len(self._items) > self.size:
+                oldest = next(iter(self._items))
+                del self._items[oldest]
+                self._locks.pop(oldest, None)
+            return renderer
 
 
 def _mcp_app():
@@ -230,6 +265,36 @@ def create_app() -> ASGIApp:
         except FileNotFoundError as e:
             raise HTTPException(404, str(e)) from e
         return file_response(data, download_name(await visible_name(uuid), uuid, name))
+
+    # --- rendering: pages as the tablet shows them, ink included (see core/renderer.py) ---------
+
+    renders = RenderCache()
+
+    def page_or_404(fn, *args):
+        try:
+            return fn(*args)
+        except PageNotFound as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.get("/api/docs/{uuid}/pages")
+    async def doc_pages(uuid: str):
+        """Every page in tablet order: number, page ID, the PDF page behind it, ink, size in points."""
+        return {"pages": [p.as_dict() for p in (await renders.get(uuid)).pages]}
+
+    @app.get("/api/docs/{uuid}/pages/{number}.png")
+    async def page_png(uuid: str, number: int, width: int | None = Query(None, ge=32, le=4000)):
+        renderer = await renders.get(uuid)
+        png = await asyncio.to_thread(page_or_404, renderer.png, number, width)
+        name = download_name(await visible_name(uuid), uuid, f" p{number}.png")
+        return file_response(png, name, inline=True, cache="private, max-age=60")
+
+    @app.get("/api/docs/{uuid}/render.pdf")
+    async def render_pdf(uuid: str):
+        """The whole document rendered with its ink, fetched fresh from the tablet."""
+        renderer = await renders.get(uuid, fresh=True)
+        pdf = await asyncio.to_thread(page_or_404, renderer.pdf)
+        name = renderer.doc.metadata.get("visibleName") or await visible_name(uuid)
+        return file_response(pdf, download_name(name, uuid, " (rendered).pdf"))
 
     @app.get("/", include_in_schema=False)
     @app.get("/ui", include_in_schema=False)

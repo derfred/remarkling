@@ -99,3 +99,55 @@ def test_download_files_and_rmdoc(client):
     with zipfile.ZipFile(io.BytesIO(r.content)) as z:
         assert z.read(f"{u}.pdf") == pdf and f"{u}/{page}.rm" in z.namelist()
     assert client.get("/api/docs/nope/rmdoc", headers=auth).status_code == 404
+
+
+def test_render_pages_and_pdf(client):
+    import io
+    from urllib.parse import quote
+
+    import pymupdf
+    from PIL import Image
+
+    auth = {"Authorization": "Bearer phone"}
+    r = client.post("/push", headers=auth, files={"file": ("spec.pdf", sample_pdf(), "application/pdf")})
+    u = client.bridge.store.get(r.json()["doc_id"]).rm_uuid
+    client.bridge.transport.annotate(u, rm_page([line([(0, 300), (10, 310)])]), move_to="Inbox")
+    name = client.bridge.transport.docs[u][0].name
+
+    assert client.get(f"/api/docs/{u}/pages").status_code == 401
+    pages = client.get(f"/api/docs/{u}/pages", headers=auth).json()["pages"]
+    assert [(p["number"], p["pdf_page"], p["has_ink"]) for p in pages] == [(1, 0, True)]
+
+    r = client.get(f"/api/docs/{u}/pages/1.png?width=300", headers=auth)
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png"
+    assert r.headers["content-disposition"].startswith("inline;")
+    assert Image.open(io.BytesIO(r.content)).width == 300
+    assert client.get(f"/api/docs/{u}/pages/2.png", headers=auth).status_code == 404
+    assert client.get(f"/api/docs/{u}/pages/1.png?width=5", headers=auth).status_code == 422
+
+    r = client.get(f"/api/docs/{u}/render.pdf", headers=auth)
+    assert r.status_code == 200 and r.headers["content-type"] == "application/pdf"
+    assert quote(f"{name} (rendered).pdf", safe="") in r.headers["content-disposition"]
+    assert pymupdf.open(stream=r.content, filetype="pdf")[0].get_drawings()
+
+    assert client.get("/api/docs/nope/pages", headers=auth).status_code == 404
+    assert client.get("/api/docs/nope/render.pdf", headers=auth).status_code == 404
+
+
+def test_page_previews_share_one_download(client):
+    auth = {"Authorization": "Bearer phone"}
+    r = client.post("/push", headers=auth, files={"file": ("spec.pdf", sample_pdf(), "application/pdf")})
+    u = client.bridge.store.get(r.json()["doc_id"]).rm_uuid
+    t = client.bridge.transport
+    calls, original = [], t.download
+
+    async def counting(remote):
+        calls.append(remote.uuid)
+        return await original(remote)
+
+    t.download = counting
+    client.get(f"/api/docs/{u}/pages", headers=auth)
+    client.get(f"/api/docs/{u}/pages/1.png", headers=auth)
+    assert len(calls) == 1
+    client.get(f"/api/docs/{u}/render.pdf", headers=auth)  # a download is always fresh
+    assert len(calls) == 2

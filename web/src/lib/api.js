@@ -17,6 +17,16 @@ export async function api(path, method = "GET") {
   return (await request("/api/cache" + path, method)).json();
 }
 
+/** GET /api/docs<path> as JSON. */
+export async function docs(path) {
+  return (await request("/api/docs" + path)).json();
+}
+
+/** GET /api/docs<path> as a blob URL (for <img>, which cannot send the token). Revoke it when done. */
+export async function blobUrl(path) {
+  return URL.createObjectURL(await (await request("/api/docs" + path)).blob());
+}
+
 /** The file name a Content-Disposition header gives: filename*= (UTF-8) over filename=. */
 function dispositionName(header) {
   const star = /filename\*=UTF-8''([^;]+)/i.exec(header || "");

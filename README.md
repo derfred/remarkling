@@ -18,7 +18,12 @@ inkbridge/
   core/
     render.py      # HTML/MD/URL -> tall PDF (Playwright), split at h2 over 5,000 mm, stamp /InkBridgeId
     transport/     # base.py protocol; cloud.py (sync15 blob API); ssh.py (developer mode)
-    overlay.py     # rmscene -> annotated.pdf + 2x PNG, highlights, ink bands
+    scene.py       # .rm (v6) page -> strokes with per-point pen data, highlights, typed text (rmscene)
+    renderer.py    # any document (notebooks too) -> PDF or per-page PNG, tablet page order
+    pens.py        # per-pen stroke width and opacity from pressure, speed, tilt
+    pagetext.py    # typed text layout; where text-anchored ink goes
+    templates.py   # lined, grid and dotted page templates, redrawn from their names
+    overlay.py     # pull pipeline: annotated.pdf + 2x PNG, highlights, ink bands (on renderer.py)
     interpret.py   # 1,400 px strips, 15% overlap, inked strips only -> Claude -> merged feedback
     trilium.py     # ETAPI note per doc; re-pull updates in place
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
@@ -192,6 +197,49 @@ Downloaded files are named after the document, e.g. `Spec.pdf` or `Spec <page>.r
 | ------------------------------------ | ---------------------------------------------------------- |
 | `/api/docs/{uuid}/files/{name}`      | one file by its index name (`<uuid>.pdf`, `<uuid>/<page>.rm`); 404 if missing |
 | `/api/docs/{uuid}/rmdoc`             | the whole document as an `.rmdoc` zip                      |
+| `/api/docs/{uuid}/render.pdf`        | the whole document rendered with its ink (see below)       |
+| `/api/docs/{uuid}/pages`             | its pages in tablet order: number, page ID, PDF page behind it, ink, size |
+| `/api/docs/{uuid}/pages/{n}.png`     | page `n` (1-based) rendered; `width` in pixels (32–4000)   |
+
+### Rendering
+
+`inkbridge/core/renderer.py` renders a document the way the tablet shows it. Each tablet page
+becomes one output page, in tablet order, so pages added or deleted on the tablet come out right.
+A page is drawn in layers:
+
+1. **Background**: the original PDF page, or for notebooks and pages added on the tablet, a blank
+   page at screen size (3:4, `RM_PAGE_WIDTH_UNITS` wide) that grows to fit ink or text beyond the
+   screen. Lined, grid and dotted templates are redrawn from the template's name
+   (`templates.py`). Other templates (planners, isometric, ...) stay blank, because their images
+   live on the tablet; the UI says so per page.
+2. **Typed text** (`pagetext.py`): headings, bold, bullets and checkboxes, laid out with MuPDF's
+   HTML engine and sans-serif fonts. Ink drawn next to text is stored relative to a character of
+   it; it moves down to that character's line.
+3. **Highlights and strokes**: each pen has its own model of width and opacity per segment,
+   driven by pressure, speed and tilt (`pens.py`): fineliner uniform, ballpoint and pencil fading
+   with lighter pressure, brush and calligraphy pen swelling with pressure and tilt, highlighter
+   and shader translucent. Hidden layers are skipped.
+
+`.rm` pages are parsed once (`scene.py`). The pull pipeline uses the same renderer (`overlay.py`),
+so notebooks returned to the Outbox are interpreted too. Their "original" is the rendering without
+ink: the template plus typed text. Strip context comes from that ink-free rendering, so it stays
+right when pages were added on the tablet.
+
+The document page in the UI shows the rendered pages on request ("Show pages") and offers the
+rendered PDF as a download. Page previews reuse one download per document for 2 minutes; the
+rendered PDF is always fetched fresh.
+
+Approximations to check against the tablet (M0):
+
+- **Pens**: the formulas follow rmc (github.com/ricklupton/rmc), not the tablet's own brushes.
+  Pencil and brush grain is approximated by opacity.
+- **Text**: fonts are not the tablet's, so long paragraphs can wrap differently. Ink anchored to a
+  word then follows our line, not the tablet's. The anchor convention (first line's top 88 units
+  above the text block's `pos_y`) comes from rmc.
+- **Erasers**: eraser strokes are skipped. v6 pages store strokes with the erased parts already
+  removed; documents from much older firmware (v5 and earlier) are not readable by rmscene at all.
+- **EPUBs**: ink and text are drawn on blank pages, because the tablet lays the book out itself.
+- Landscape notebooks render in portrait.
 
 ## Claude connector (M7)
 
