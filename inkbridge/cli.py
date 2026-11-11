@@ -10,6 +10,8 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 
+from dotenv import find_dotenv, load_dotenv
+
 from .config import get_settings
 
 
@@ -67,6 +69,7 @@ async def _register(args) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    load_dotenv(find_dotenv(usecwd=True))
     parser = argparse.ArgumentParser(prog="inkbridge")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)

@@ -7,7 +7,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /bin/
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DATA_DIR=/data PROMPTS_DIR=/app/prompts \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
     PATH=/app/.venv/bin:$PATH
+
+# Install the Python version specified in .python-version using uv.
+COPY .python-version ./
+RUN UV_PYTHON_DOWNLOADS=automatic uv python install
 
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && rm -rf /var/lib/apt/lists/*
 

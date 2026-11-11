@@ -2,7 +2,7 @@
 name = "inkbridge"
 version = "0.1.0"
 description = "Push content to a reMarkable tablet, pull handwritten markup back as structured feedback."
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = [
   "anthropic>=0.40",
   "fastapi>=0.110",
@@ -13,6 +13,7 @@ dependencies = [
   "pillow>=10",
   "playwright==1.64.1",  # must match the Playwright base image tag in Dockerfile
   "pymupdf>=1.24",
+  "python-dotenv>=1.0",
   "python-multipart>=0.0.9",
   "rmscene==0.8.0",
   "uvicorn[standard]>=0.29",
