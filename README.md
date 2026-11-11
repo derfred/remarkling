@@ -22,11 +22,14 @@ inkbridge/
     interpret.py   # 1,400 px strips, 15% overlap, inked strips only -> Claude -> merged feedback
     trilium.py     # ETAPI note per doc; re-pull updates in place
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
+    explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), poll_outbox()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
-  api.py           # FastAPI /push /poll /healthz + MCP at /mcp, bearer-token auth
+  api.py           # FastAPI /push /poll /healthz, /api/cache, /ui + MCP at /mcp, bearer-token auth
+  web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll_outbox() every POLL_INTERVAL_S
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
+web/               # cache explorer UI: Svelte 5 + Tailwind CSS 4, built by Vite into inkbridge/web
 prompts/interpret.md
 deploy/jsonnet/    # Kubernetes objects as a jsonnet library; VERSION = the release version
 ```
@@ -41,6 +44,7 @@ cp .env.example .env            # fill in RM_DEVICE_TOKEN, ANTHROPIC_API_KEY
 uv run inkbridge push spec.html  # M1
 uv run inkbridge poll            # M2/M3
 uv run pytest
+(cd web && npm ci && npm run build)  # the cache explorer UI at /ui/; the tests don't need it
 ```
 
 Add or bump dependencies with `uv add <pkg>` (or `uv add --dev <pkg>`) and commit `uv.lock`.
@@ -132,6 +136,33 @@ sit on it too so both containers see the same one. Switching does not migrate ex
   Notification "Pulled N: titles" (optionally open `trilium_url`), else "Nothing in Outbox".
 - **Send to reMarkable**: Show in Share Sheet for URLs and PDFs; POST `https://<host>/push` as a form
   with `url` or `file` (and optional `title`), same header.
+
+## Cache explorer
+
+`https://<host>/ui/` is a mobile-first web UI for the cloud blob cache: browse the library as the
+last cloud listing saw it (folders, documents, pages, which files are cached, Ink Bridge status),
+the raw cache entries by kind (root, index, metadata, content), and cache stats. The page itself
+is public and holds no data; it asks for `API_TOKEN` once and keeps it in the browser. It is
+read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
+the cache with the current root, fetching any index, `.metadata` or `.content` blob it lacks (a poll
+skips `.content`, which holds page counts and file types). Blobs already cached cost no request.
+
+The UI is a Svelte 5 app styled with Tailwind CSS 4, in `web/`. `npm run build` writes it into
+`inkbridge/web/`, which the server serves at `/ui/` (fingerprinted `assets/` cached for good,
+`index.html` never); without a build, `/ui/` answers 503. The Docker image builds it in a Node stage.
+For UI work, run `inkbridge serve` on :8000 and `npm run dev` in `web/`: Vite serves the app on
+http://localhost:5173/ui/ with hot reload and proxies `/api` to the server.
+
+The same data is a REST API with `Authorization: Bearer <API_TOKEN>`:
+
+| Route                           | Returns                                                         |
+| ------------------------------- | --------------------------------------------------------------- |
+| `/api/cache`                    | counts and bytes by kind, current root, library and health stats |
+| `/api/cache/library`            | every document and folder in the cached root (flat; `parent` links them) |
+| `/api/cache/library/{uuid}`     | one node: breadcrumbs, metadata, content, its files and whether each is cached |
+| `/api/cache/blobs`              | cache entries; `kind`, `q` (key, file or document name), `limit`, `offset` |
+| `/api/cache/blobs/{key}`        | one entry decoded: parsed index, JSON or text                   |
+| `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched (501 on SSH) |
 
 ## Claude connector (M7)
 

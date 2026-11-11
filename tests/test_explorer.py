@@ -1,0 +1,174 @@
+import httpx
+import pytest
+from starlette.testclient import TestClient
+
+from inkbridge import config
+from inkbridge.core import pipeline
+from inkbridge.core.explorer import CacheSnapshot
+from inkbridge.core.store import Doc, SQLiteStore
+from inkbridge.core.transport.cloud import CACHE_PREFIX, CloudTransport
+from fakes import FakeInterpreter, MemoryTransport
+from rmfixtures import sample_pdf
+from test_cloud import FakeCloud
+
+
+@pytest.fixture
+async def filled():
+    """A store whose cache holds a listed library: Inbox/Spec, Outbox/Notes, plus one trashed doc."""
+    store = SQLiteStore(":memory:")
+    fake = FakeCloud()
+    t = CloudTransport("device", "https://auth.test", "https://sync.test",
+                       client=httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)), cache=store)
+    spec = await t.upload_pdf(sample_pdf(), "Spec · rm-abcdef", "Inbox")
+    notes = await t.upload_pdf(sample_pdf(), "Notes", "Outbox")
+    await t.list_folder("Inbox")
+    store.upsert(Doc("rm-abcdef", "rm-abcdef", "Spec", "pdf", rm_uuid=spec, status="pushed", pushed_at=1.0))
+    yield store, spec, notes
+    await t.aclose()
+    store.close()
+
+
+async def test_snapshot_rebuilds_library(filled):
+    store, spec, notes = filled
+    snap = CacheSnapshot(store)
+    lib = {n["name"]: n for n in snap.library()}
+    assert set(lib) == {"Inbox", "Outbox", "Spec · rm-abcdef", "Notes"}
+    assert lib["Inbox"]["type"] == "folder" and lib["Inbox"]["children"] == 1
+    assert lib["Spec · rm-abcdef"]["parent"] == lib["Inbox"]["uuid"]
+    assert lib["Spec · rm-abcdef"]["file_type"] == "pdf"
+    assert lib["Spec · rm-abcdef"]["page_count"] == 1
+    assert lib["Spec · rm-abcdef"]["inkbridge"]["doc_id"] == "rm-abcdef"
+    assert lib["Notes"]["inkbridge"] is None
+
+    detail = snap.node_detail(spec)
+    assert detail["path"] == [{"uuid": lib["Inbox"]["uuid"], "name": "Inbox"}]
+    cached = {f["name"].split(".")[-1]: f["cached"] for f in detail["file_list"]}
+    assert cached == {"metadata": True, "content": True, "pdf": False, "pagedata": False}
+    assert snap.node_detail("missing") is None
+
+
+async def test_summary_and_blobs(filled):
+    store, spec, _ = filled
+    snap = CacheSnapshot(store)
+    s = snap.summary()
+    assert s["library"] == {"documents": 2, "folders": 2, "trashed": 0, "uncached": 0, "tracked": 1}
+    assert s["by_kind"]["root"]["count"] == 1
+    assert s["by_kind"]["index"]["count"] == 4
+    assert s["by_kind"]["metadata"]["count"] == 4
+    assert s["unreferenced"] == 0
+    assert s["root"]["entries"] == 4
+
+    metas = snap.blob_list(kind="metadata")
+    assert metas["total"] == 4
+    assert {i["doc_name"] for i in metas["items"]} == {"Inbox", "Outbox", "Spec · rm-abcdef", "Notes"}
+    # Its index and metadata; the .content blob is identical for both PDFs, so it is shared (by hash)
+    # and attributed to one of them.
+    assert {i["kind"] for i in snap.blob_list(q="spec")["items"]} >= {"index", "metadata"}
+
+    root = snap.blob_detail(CACHE_PREFIX + s["root"]["hash"])
+    assert root["encoding"] == "index"
+    assert {e["name"] for e in root["index"]["entries"]} == {"Inbox", "Outbox", "Spec · rm-abcdef", "Notes"}
+    meta_key = next(i["key"] for i in metas["items"] if i["doc_uuid"] == spec)
+    assert snap.blob_detail(meta_key)["value"]["visibleName"] == "Spec · rm-abcdef"
+
+
+def test_empty_cache():
+    snap = CacheSnapshot(SQLiteStore(":memory:"))
+    assert snap.library() == []
+    assert snap.summary()["root"] is None
+
+
+@pytest.fixture
+def ui_dir(tmp_path, monkeypatch):
+    """A stand-in for the built UI, so these tests need no Node build."""
+    from inkbridge import api
+
+    ui = tmp_path / "ui"
+    (ui / "assets").mkdir(parents=True)
+    (ui / "index.html").write_text('<div id="app"></div><script src="/ui/assets/index-abc.js"></script>')
+    (ui / "assets" / "index-abc.js").write_text("console.log(1)")
+    monkeypatch.setattr(api, "UI_DIR", ui)
+    return ui
+
+
+@pytest.fixture
+def client(filled, ui_dir, tmp_path, monkeypatch):
+    store, spec, _ = filled
+    monkeypatch.setenv("API_TOKEN", "phone")
+    monkeypatch.setenv("MCP_TOKEN", "chat")
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    config.get_settings.cache_clear()
+    bridge = pipeline.InkBridge(config.get_settings(), store, MemoryTransport(), FakeInterpreter())
+    monkeypatch.setattr(pipeline, "_bridge", bridge)
+    from inkbridge.api import create_app
+
+    with TestClient(create_app()) as c:
+        c.spec = spec
+        yield c
+    config.get_settings.cache_clear()
+
+
+def test_api_requires_token_but_ui_does_not(client):
+    assert client.get("/api/cache").status_code == 401
+    assert client.get("/api/cache", headers={"Authorization": "Bearer chat"}).status_code == 401
+    r = client.get("/ui/")
+    assert r.status_code == 200 and 'id="app"' in r.text
+    assert r.headers["cache-control"] == "no-cache"
+    r = client.get("/ui/assets/index-abc.js")
+    assert r.status_code == 200 and "immutable" in r.headers["cache-control"]
+    assert client.get("/", follow_redirects=False).headers["location"] == "/ui/"
+    assert client.get("/ui", follow_redirects=False).headers["location"] == "/ui/"
+
+
+def test_ui_not_built(client, ui_dir, monkeypatch):
+    from inkbridge.api import create_app
+
+    monkeypatch.setattr("inkbridge.api.UI_DIR", ui_dir / "missing")
+    with TestClient(create_app()) as c:
+        r = c.get("/ui/")
+        assert r.status_code == 503 and "npm run build" in r.text
+
+
+def test_api_routes(client):
+    auth = {"Authorization": "Bearer phone"}
+    assert client.get("/api/cache", headers=auth).json()["library"]["documents"] == 2
+    items = client.get("/api/cache/library", headers=auth).json()["items"]
+    assert items[0]["type"] == "folder"  # folders first
+    assert client.get(f"/api/cache/library/{client.spec}", headers=auth).json()["name"] == "Spec · rm-abcdef"
+    assert client.get("/api/cache/library/nope", headers=auth).status_code == 404
+    blobs = client.get("/api/cache/blobs?kind=root", headers=auth).json()
+    assert blobs["total"] == 1
+    assert client.get("/api/cache/blobs/" + blobs["items"][0]["key"], headers=auth).json()["kind"] == "root"
+    assert client.get("/api/cache/blobs/cloud.blob:none", headers=auth).status_code == 404
+    assert client.get("/api/cache/blobs?kind=bogus", headers=auth).status_code == 422
+
+
+async def test_sync_fills_the_cache_including_content():
+    store = SQLiteStore(":memory:")
+    fake = FakeCloud()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+    writer = CloudTransport("device", "https://auth.test", "https://sync.test", client=client)  # no cache
+    await writer.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    await writer.upload_pdf(sample_pdf(), "Notes", "Inbox")
+
+    t = CloudTransport("device", "https://auth.test", "https://sync.test", client=client, cache=store)
+    await t.list_folder("Inbox")  # a listing caches indexes and metadata, not .content
+    assert CacheSnapshot(store).summary()["by_kind"]["content"]["count"] == 0
+
+    r = await t.sync()
+    assert r["documents"] == 3 and r["entries"] == 3
+    assert r["fetched"] == 2  # folder "{}" and the PDFs' shared .content: one blob each
+    snap = CacheSnapshot(store)
+    assert snap.summary()["library"]["uncached"] == 0
+    assert {n["name"]: n["page_count"] for n in snap.library() if n["type"] == "document"} == {"Spec": 1, "Notes": 1}
+
+    store._execute("DELETE FROM cache WHERE key = ?", (CACHE_PREFIX + r["root"],))
+    again = await t.sync()  # the unchanged-root memo is bypassed, so a missing row is refetched
+    assert again["fetched"] == 1
+    assert (await t.sync())["fetched"] == 0
+    await client.aclose()
+
+
+def test_sync_needs_the_cloud_transport(client):
+    assert client.post("/api/cache/sync").status_code == 401
+    assert client.post("/api/cache/sync", headers={"Authorization": "Bearer phone"}).status_code == 501

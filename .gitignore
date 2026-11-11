@@ -7,3 +7,6 @@ data/
 .env.production
 *.kubeconfig
 .env
+node_modules/
+# Built from web/ by `npm run build`
+inkbridge/web/

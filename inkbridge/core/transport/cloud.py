@@ -334,6 +334,34 @@ class CloudTransport:
         log.info("listed root %s: %d entries, %d blobs fetched", root_hash[:12], len(root.entries), self.blob_fetches - fetches)
         return docs
 
+    async def sync(self) -> dict:
+        """Fill the blob cache for the current root: every index, .metadata and .content blob.
+
+        A listing caches indexes and metadata only, and skips the store entirely while the root
+        is unchanged; this re-reads the store and fetches whatever is missing, .content included
+        (which carries page counts and file types). Blobs already cached cost no request.
+        """
+        fetches = self.blob_fetches
+        root_hash, _, root = await self.get_root()
+        self._listing = None
+        self._doc_cache.clear()  # go through the store, so rows missing there are refetched
+        docs = await self._all_docs(root_hash, root)
+        # By hash: identical .content files (e.g. one-page PDFs) are one blob.
+        contents = list({f.hash: f for index, _ in self._doc_cache.values() for f in index.entries
+                         if f.id.endswith(".content")}.values())
+        self.cache.prefetch([f.hash for f in contents])
+        sem = asyncio.Semaphore(8)
+
+        async def one(f: Entry):
+            async with sem:
+                await self.get_blob(f.hash, f.id)
+
+        await asyncio.gather(*(one(f) for f in contents))
+        log.info("synced root %s: %d entries, %d blobs fetched", root_hash[:12], len(root.entries),
+                 self.blob_fetches - fetches)
+        return {"root": root_hash, "entries": len(root.entries), "documents": len(docs),
+                "fetched": self.blob_fetches - fetches}
+
     async def _upload_doc_files(self, doc_uuid: str, files: dict[str, bytes]) -> Entry:
         entries = []
         for name, data in files.items():

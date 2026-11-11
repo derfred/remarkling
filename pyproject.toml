@@ -33,6 +33,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["inkbridge*"]
 
+[tool.setuptools.package-data]
+inkbridge = ["web/*", "web/assets/*"]  # the built UI (web/ at the repo root; see README)
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

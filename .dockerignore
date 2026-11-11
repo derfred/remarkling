@@ -8,3 +8,5 @@ k8s
 scripts
 .github
 .venv
+**/node_modules
+inkbridge/web
