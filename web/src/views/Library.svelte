@@ -23,6 +23,11 @@
   let query = $state(stored);
   $effect(() => { try { sessionStorage.setItem("libq", query); } catch {} });
 
+  // "Recent": every document changed in the last RECENT_HOURS, newest first, ignoring folders.
+  const RECENT_HOURS = 5;
+  let recent = $state((() => { try { return sessionStorage.getItem("librecent") === "1"; } catch { return false; } })());
+  $effect(() => { try { sessionStorage.setItem("librecent", recent ? "1" : ""); } catch {} });
+
   let items = $state([]);
   const promise = getLibrary().then((list) => (items = list));
 
@@ -44,7 +49,11 @@
 
   const term = $derived(query.trim().toLowerCase());
   const shown = $derived(
-    term ? items.filter((n) => n.name.toLowerCase().includes(term) || n.uuid.startsWith(term) || n.inkbridge?.doc_id?.includes(term))
+    recent ? items
+      .filter((n) => n.type === "document" && !n.deleted && n.last_modified >= Date.now() / 1000 - RECENT_HOURS * 3600)
+      .filter((n) => !term || n.name.toLowerCase().includes(term) || n.uuid.startsWith(term) || n.inkbridge?.doc_id?.includes(term))
+      .sort((a, b) => b.last_modified - a.last_modified)
+    : term ? items.filter((n) => n.name.toLowerCase().includes(term) || n.uuid.startsWith(term) || n.inkbridge?.doc_id?.includes(term))
     : folder === "trash" ? items.filter((n) => n.parent === "trash")
     : items.filter((n) => (n.parent || "") === (folder || "") && !(n.deleted && !folder)));
   const trashed = $derived(items.filter((n) => n.parent === "trash").length);
@@ -52,6 +61,10 @@
 
 <Header {title} back={folder ? "#/library" : null}>
   <Search bind:value={query} placeholder="Search all documents" />
+  <div class="flex gap-1.5 pt-2 pb-0.5">
+    <button aria-pressed={recent} onclick={() => (recent = !recent)}
+      class="h-8.5 flex-none cursor-pointer rounded-full border border-line bg-surface px-3.5 text-sm aria-pressed:border-ink aria-pressed:bg-ink aria-pressed:text-bg">Updated in the last {RECENT_HOURS} h</button>
+  </div>
   {#if crumbs.length}<Crumbs items={crumbs} />{/if}
 </Header>
 
@@ -61,12 +74,12 @@
       {#if !items.length}
         <Empty>The cache holds no library yet.<br />Tap the cloud button to sync it now.</Empty>
       {:else if !shown.length}
-        <Empty>{term ? "No matches." : "This folder is empty."}</Empty>
+        <Empty>{recent ? `No documents updated in the last ${RECENT_HOURS} hours.` : term ? "No matches." : "This folder is empty."}</Empty>
       {:else}
         <List>{#each shown as node (node.uuid)}<NodeRow {node} />{/each}</List>
       {/if}
 
-      {#if !folder && !term && trashed}
+      {#if !folder && !term && !recent && trashed}
         <Section>Other</Section>
         <List><Row href="#/library/trash" icon="trash" title="Trash" sub={plural(trashed, "item")} /></List>
       {/if}
