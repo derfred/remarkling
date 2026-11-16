@@ -48,6 +48,14 @@ class Settings:
     # the web UI rides on the proxy's session. The proxy must overwrite it on every /api/ request.
     # Empty: /api/ needs the bearer token.
     api_auth_header: str = field(default_factory=lambda: _env("API_AUTH_HEADER").lower())
+    # What the MCP tools may do: "read" (browse and read only) or "write" (also push, create folders,
+    # rename, move, tag, trash). Write tools are not even listed under "read".
+    mcp_access: str = field(default_factory=lambda: _env("MCP_ACCESS", "write").lower())
+    # Comma-separated folder paths ("/Work,/Inbox") the MCP tools are confined to; empty means the
+    # whole library. Folders outside are invisible, and nothing can be moved or pushed out of scope.
+    mcp_folders: list[str] = field(
+        default_factory=lambda: [f.strip() for f in _env("MCP_FOLDERS").split(",") if f.strip()]
+    )
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
     )

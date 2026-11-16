@@ -306,3 +306,47 @@ async def test_download_file(cloud):
         await t.download_file("missing", "missing.pdf")
     with pytest.raises(FileNotFoundError):
         await t.download(RemoteDoc("missing", "", ""))
+
+
+async def test_entries_folders_and_metadata_updates(cloud):
+    fake, t = cloud
+    work = await t.create_folder("Work", "")
+    projects = await t.create_folder("Projects", work)
+    u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox", parent=projects)
+
+    entries = {e.uuid: e for e in await t.entries()}
+    assert entries[projects].metadata["parent"] == work
+    assert entries[projects].metadata["type"] == "CollectionType"
+    assert entries[u].metadata["parent"] == projects
+    assert entries[u].content["fileType"] == "pdf"
+    assert "Inbox" not in {e.metadata.get("visibleName") for e in entries.values()}  # parent given: no Inbox
+
+    pdf_before = (await t.download(RemoteDoc(u, "", ""))).pdf
+    fake.conflict_next = True
+    await t.update(u, metadata={"visibleName": "Spec v2", "parent": work, "pinned": True},
+                   content={"tags": [{"name": "q4", "timestamp": 1}]})
+    entries = {e.uuid: e for e in await t.entries()}
+    meta = entries[u].metadata
+    assert (meta["visibleName"], meta["parent"], meta["pinned"], meta["metadatamodified"]) == ("Spec v2", work, True, True)
+    assert meta["createdTime"]  # merged, not replaced
+    assert entries[u].content["tags"] == [{"name": "q4", "timestamp": 1}]
+    assert entries[u].content["fileType"] == "pdf"
+    assert (await t.download(RemoteDoc(u, "", ""))).pdf == pdf_before
+
+    # Trashed items are listed (the library shows the trash); list_folder still skips them.
+    await t.update(u, metadata={"parent": "trash"})
+    assert {e.uuid: e for e in await t.entries()}[u].metadata["parent"] == "trash"
+
+    with pytest.raises(FileNotFoundError):
+        await t.update("no-such-uuid", metadata={"pinned": True})
+
+
+async def test_entries_unchanged_root_costs_one_request():
+    fake = FakeCloud()
+    seen, client = _counting(fake)
+    t = _transport(fake, SQLiteStore(":memory:"), client)
+    await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    await t.entries()
+    seen.clear()
+    assert len(await t.entries()) == 2
+    assert seen == [("GET", "/sync/v4/root")]

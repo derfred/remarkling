@@ -24,7 +24,17 @@ import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from .base import Cache, RemoteDoc, RmDoc, check_file_name, document_metadata, new_uuid, now_ms, pdf_content
+from .base import (
+    Cache,
+    LibraryEntry,
+    RemoteDoc,
+    RmDoc,
+    check_file_name,
+    document_metadata,
+    new_uuid,
+    now_ms,
+    pdf_content,
+)
 
 log = logging.getLogger(__name__)
 
@@ -235,6 +245,8 @@ class CloudTransport:
         self._doc_cache: dict[str, tuple[Index, dict]] = {}
         # (root hash, live entries with metadata): an unchanged root needs no blob fetches at all.
         self._listing: tuple[str, list[tuple[Entry, dict]]] | None = None
+        # (root hash, every entry with metadata and content): the library for the MCP tools.
+        self._entries: tuple[str, list[LibraryEntry]] | None = None
         self.blob_fetches = 0
 
     async def aclose(self) -> None:
@@ -470,13 +482,15 @@ class CloudTransport:
     async def ensure_folder(self, name: str) -> str:
         root_hash, _, root = await self.get_root()
         found = await self._folder_uuid(name, await self._all_docs(root_hash, root))
-        if found:
-            return found
+        return found or await self.create_folder(name, "")
+
+    async def create_folder(self, name: str, parent: str) -> str:
+        """Create a folder named `name` in the folder `parent` ("" for the top level); return its UUID."""
         folder_uuid = new_uuid()
 
         async def mutate(root: Index):
             files = {
-                f"{folder_uuid}.metadata": json.dumps(document_metadata(name, "", "CollectionType")).encode(),
+                f"{folder_uuid}.metadata": json.dumps(document_metadata(name, parent, "CollectionType")).encode(),
                 f"{folder_uuid}.content": b"{}",
             }
             root.put(await self._upload_doc_files(folder_uuid, files))
@@ -502,10 +516,44 @@ class CloudTransport:
             if m.get("parent") == folder and m.get("type") == "DocumentType"
         ]
 
-    async def upload_pdf(self, pdf: bytes, visible_name: str, folder: str) -> str:
+    async def entries(self) -> list[LibraryEntry]:
+        """Every document and folder, trashed ones included, with metadata and .content.
+
+        Costs one request while the root is unchanged; otherwise only changed entries are fetched.
+        """
+        root_hash, _, root = await self.get_root()
+        if self._entries and self._entries[0] == root_hash:
+            return self._entries[1]
+        await self._all_docs(root_hash, root)  # fills _doc_cache for every root entry
+        docs = [(e, *self._doc_cache[e.hash]) for e in root.entries if e.hash in self._doc_cache]
+        content_files = [next((f for f in index.entries if f.id.endswith(".content")), None) for _, index, _ in docs]
+        self.cache.prefetch([f.hash for f in content_files if f is not None])
+        sem = asyncio.Semaphore(8)
+
+        async def content(f: Entry | None) -> dict:
+            if f is None:
+                return {}
+            async with sem:
+                try:
+                    parsed = json.loads(await self.get_blob(f.hash, f.id))
+                except ValueError:
+                    return {}
+            return parsed if isinstance(parsed, dict) else {}
+
+        contents = await asyncio.gather(*(content(f) for f in content_files))
+        out = [
+            LibraryEntry(uuid=e.id, version=e.hash, metadata=meta, content=c)
+            for (e, _, meta), c in zip(docs, contents)
+            if not meta.get("deleted")
+        ]
+        self._entries = (root_hash, out)
+        return out
+
+    async def upload_pdf(self, pdf: bytes, visible_name: str, folder: str, parent: str | None = None) -> str:
+        """Upload a PDF into the top-level folder `folder`, or into the folder UUID `parent` if given."""
         import pymupdf
 
-        folder_uuid = await self.ensure_folder(folder)
+        folder_uuid = parent if parent is not None else await self.ensure_folder(folder)
         with pymupdf.open(stream=pdf, filetype="pdf") as d:
             pages = d.page_count
         doc_uuid = new_uuid()
@@ -544,20 +592,34 @@ class CloudTransport:
         return await self.get_blob(file.hash, file.id)
 
     async def move(self, doc: RemoteDoc, folder: str) -> None:
-        folder_uuid = await self.ensure_folder(folder)
+        await self.update(doc.uuid, metadata={"parent": await self.ensure_folder(folder)})
+
+    async def update(self, doc_uuid: str, metadata: dict | None = None, content: dict | None = None) -> None:
+        """Merge `metadata` into the .metadata and `content` into the .content of a document or folder.
+
+        Only those two files are rewritten: pages, strokes and the PDF stay as they are. Raises
+        FileNotFoundError when the document does not exist.
+        """
 
         async def mutate(root: Index):
-            entry = root.get(doc.uuid)
+            entry = root.get(doc_uuid)
             if entry is None:
-                raise CloudError(f"document {doc.uuid} not found")
+                raise FileNotFoundError(f"document {doc_uuid} not found")
             index, meta = await self._doc(entry)
-            meta = {**meta, "parent": folder_uuid, "lastModified": now_ms(), "metadatamodified": True}
-            meta_name = f"{doc.uuid}.metadata"
-            meta_bytes = json.dumps(meta).encode()
+            files = {}
+            if metadata:
+                files[f"{doc_uuid}.metadata"] = {**meta, **metadata, "lastModified": now_ms(),
+                                                 "metadatamodified": True}
+            if content:
+                current = index.get(f"{doc_uuid}.content")
+                old = json.loads(await self.get_blob(current.hash, current.id)) if current else {}
+                files[f"{doc_uuid}.content"] = {**old, **content}
             index = Index(index.schema, list(index.entries))
-            index.put(Entry(await self.put_blob(meta_bytes, meta_name), FILE_TYPE, meta_name, 0, len(meta_bytes)))
-            data = index.serialize(doc.uuid)
-            h = await self.put_blob(data, f"{doc.uuid}.docSchema", index.hash(data))
-            root.put(Entry(h, DOC_TYPE, doc.uuid, len(index.entries), sum(e.size for e in index.entries)))
+            for name, value in files.items():
+                data = json.dumps(value).encode()
+                index.put(Entry(await self.put_blob(data, name), FILE_TYPE, name, 0, len(data)))
+            data = index.serialize(doc_uuid)
+            h = await self.put_blob(data, f"{doc_uuid}.docSchema", index.hash(data))
+            root.put(Entry(h, DOC_TYPE, doc_uuid, len(index.entries), sum(e.size for e in index.entries)))
 
         await self._commit(mutate)

@@ -215,6 +215,24 @@ class Renderer:
         """Each page's typed text ("" where there is none)."""
         return [p.text.plain if p.text else "" for p in self._pages]
 
+    def ink(self, number: int) -> PageInk:
+        """One page's (1-based) strokes and highlights, in .rm units, text-anchored strokes placed."""
+        return self._page(number).ink
+
+    def mapping(self, number: int) -> tuple[float, float]:
+        """(scale, x0) mapping one page's .rm units onto its rendered PDF points:
+        x_pt = x * scale + x0, y_pt = y * scale."""
+        p = self._page(number)
+        if p.info.pdf_page is None:
+            return PT_PER_UNIT, p.blank_half_width * PT_PER_UNIT
+        m = Mapping(pymupdf.Rect(0, 0, p.info.width, p.info.height), p.ink, self.mode, self.rm_width)
+        return m.scale, m.x0
+
+    def _page(self, number: int) -> _Page:
+        if not 1 <= number <= len(self._pages):
+            raise PageNotFound(f"{self.doc.uuid} has no page {number}")
+        return self._pages[number - 1]
+
     # --- rendering ---------------------------------------------------------------------------
 
     def _draw_page(self, out: pymupdf.Document, src: pymupdf.Document | None, p: _Page,
@@ -269,14 +287,13 @@ class Renderer:
         with out:
             return out.tobytes(garbage=3, deflate=True)
 
-    def png(self, number: int, width: int | None = None) -> bytes:
-        """One page (1-based) as a PNG, `width` pixels wide (default: 2 px per point)."""
-        if not 1 <= number <= len(self._pages):
-            raise PageNotFound(f"{self.doc.uuid} has no page {number}")
-        info = self._pages[number - 1].info
+    def png(self, number: int, width: int | None = None, ink: bool = True) -> bytes:
+        """One page (1-based) as a PNG, `width` pixels wide (default: 2 px per point); ink=False
+        leaves out strokes and highlights."""
+        info = self._page(number).info
         scale = width / info.width if width else 2.0
         # Pixel sizes round up, so leave a little room under the cap.
         scale = min(scale, math.sqrt(MAX_PIXELS / ((info.width + 1) * (info.height + 1))) * 0.99)
-        out, _ = self.render(numbers=[number])
+        out, _ = self.render(ink, numbers=[number])
         with out:
             return out[0].get_pixmap(matrix=pymupdf.Matrix(scale, scale), alpha=False).tobytes("png")
