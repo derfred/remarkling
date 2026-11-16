@@ -24,7 +24,8 @@ from rmscene.scene_stream import (
 )
 from rmscene.tagged_block_common import CrdtId, LwwValue
 
-from inkbridge.core.transport.base import RmDoc, pdf_content
+from inkbridge.core.cloud import pdf_content
+from inkbridge.core.rmdoc import RmDoc
 
 LAYER = CrdtId(0, 11)
 

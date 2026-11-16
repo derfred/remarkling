@@ -27,7 +27,7 @@ from .config import get_settings
 from .core.explorer import KINDS, CacheSnapshot
 from .core.pipeline import get_bridge
 from .core.renderer import PageNotFound, Renderer
-from .core.transport.base import RemoteDoc
+from .core.cloud import RemoteDoc
 from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
@@ -176,10 +176,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/cache/sync")
     async def cache_sync():
-        sync = getattr(get_bridge().transport, "sync", None)
-        if sync is None:
-            raise HTTPException(501, "only the cloud transport keeps a cache")
-        return await sync()
+        return await get_bridge().transport.sync()
 
     @app.get("/api/cache/library")
     def cache_library():
@@ -208,7 +205,7 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "no such cache entry")
         return detail
 
-    # --- downloads: a document's files, fetched from the tablet (cloud or SSH), not the cache -----
+    # --- downloads: a document's files, fetched from the cloud, not the cache -----------------
 
     async def visible_name(uuid: str) -> str:
         node = snapshot().nodes.get(uuid)

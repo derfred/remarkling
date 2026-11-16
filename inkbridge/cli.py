@@ -61,7 +61,7 @@ async def _inbox(args) -> None:
 
 
 async def _register(args) -> None:
-    from .core.transport.cloud import register_device
+    from .core.cloud import register_device
 
     token = await register_device(args.code, get_settings().rm_auth_host)
     print("Store this as RM_DEVICE_TOKEN:")

@@ -7,7 +7,7 @@ import pytest
 from PIL import Image
 
 from inkbridge.core.renderer import PT_PER_UNIT, PageNotFound, Renderer
-from inkbridge.core.transport.base import RmDoc
+from inkbridge.core.rmdoc import RmDoc
 from rmfixtures import line, notebook, rm_page, rmdoc, sample_pdf
 
 

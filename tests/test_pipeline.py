@@ -93,7 +93,7 @@ async def test_failed_archive_move_is_retried_without_reprocessing(bridge):
 async def test_notebooks_in_outbox_are_processed(bridge):
     from rmscene import scene_items as si
 
-    from inkbridge.core.transport.base import RemoteDoc
+    from inkbridge.core.cloud import RemoteDoc
     from rmfixtures import notebook, page_text
 
     t = bridge.transport

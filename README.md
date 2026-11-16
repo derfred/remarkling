@@ -17,7 +17,8 @@ done:  doc moved to /Archive
 inkbridge/
   core/
     render.py      # HTML/MD/URL -> tall PDF (Playwright), split at h2 over 5,000 mm, stamp /InkBridgeId
-    transport/     # base.py protocol; cloud.py (sync15 blob API); ssh.py (developer mode)
+    cloud.py       # reMarkable cloud client (sync15 blob API, notifications websocket)
+    rmdoc.py       # a document's files (.rmdoc contents): metadata, content, PDF, page .rm
     scene.py       # .rm (v6) page -> strokes with per-point pen data, highlights, typed text (rmscene)
     renderer.py    # any document (notebooks too) -> PDF or per-page PNG, tablet page order
     pens.py        # per-pen stroke width and opacity from pressure, speed, tilt
@@ -63,8 +64,8 @@ The poller does not poll on a timer when it can avoid it. It holds the cloud's n
 websocket open (`wss://<RM_SYNC_HOST>/notifications/ws/json/1`, override with `RM_NOTIFICATIONS_URL`).
 Every sync, including the tablet's, sends a message there, and each message triggers a
 `poll_outbox()` after a 2 s debounce. A reconnect also triggers one, to catch up on anything missed. While the
-socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket (SSH transport,
-`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
+socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket
+(`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
@@ -78,7 +79,7 @@ These are assumptions the code makes that only the real tablet and cloud can con
   (1404 on reMarkable 2). Annotate a known spot on the Paper Pro and adjust if strokes land off.
 - **Cloud protocol.** `cloud.py` follows the rmapi sync15 flow (`/sync/v4/root`, `/sync/v3/files`,
   generation-checked root swap). Hosts are `RM_AUTH_HOST` / `RM_SYNC_HOST`. If the account uses a
-  different schema or host, fix it there; `RM_TRANSPORT=ssh` is the fallback.
+  different schema or host, fix it there.
 - **Notifications websocket.** The endpoint (`/notifications/ws/json/1` on the sync host, bearer
   user token) and message shape (`{"message": {"attributes": {"event": "SyncComplete", ...}}}`)
   come from rmapi/rmfakecloud. Annotate a page and move it to Outbox, then check that the poller logs
@@ -207,15 +208,14 @@ The same data is a REST API:
 | `/api/cache/library/{uuid}`     | one node: breadcrumbs, metadata, content, its files and whether each is cached |
 | `/api/cache/blobs`              | cache entries; `kind`, `q` (key, file or document name), `limit`, `offset` |
 | `/api/cache/blobs/{key}`        | one entry decoded: parsed index, JSON or text                   |
-| `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched (501 on SSH) |
+| `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched |
 
 ### Downloads
 
 A document's page in the UI downloads its original (PDF or EPUB), any single file from its index,
 or the whole document as an `.rmdoc` (a zip with the original, metadata and every page's strokes).
 Unlike the rest of the explorer, downloads don't come from the cache. The server fetches them from
-the tablet on request, over the cloud or SSH transport, so they work for files marked "not cached".
-Downloaded files are named after the document, e.g. `Spec.pdf` or `Spec <page>.rm`.
+the cloud on request, so they work for files marked "not cached". Downloaded files are named after the document, e.g. `Spec.pdf` or `Spec <page>.rm`.
 
 | Route                                | Returns                                                    |
 | ------------------------------------ | ---------------------------------------------------------- |

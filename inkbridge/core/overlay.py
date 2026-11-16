@@ -16,7 +16,7 @@ from PIL import Image
 
 from .renderer import Mapping, Renderer  # noqa: F401  (Mapping: re-exported for callers and tests)
 from .scene import COLOR_NAMES, COLORS, RM_HEIGHT, RM_WIDTH, Highlight, PageInk, Stroke, parse_page  # noqa: F401
-from .transport.base import RmDoc
+from .rmdoc import RmDoc
 
 PNG_SCALE = 2.0
 

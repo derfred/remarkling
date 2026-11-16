@@ -18,7 +18,7 @@ from . import render
 from .interpret import Interpreter, slice_strips
 from .overlay import overlay
 from .store import Doc, Store, now, open_store
-from .transport import RemoteDoc, Transport, make_transport
+from .cloud import CloudTransport, RemoteDoc
 from .trilium import Trilium
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class InkBridge:
         self,
         settings: Settings | None = None,
         store: Store | None = None,
-        transport: Transport | None = None,
+        transport: CloudTransport | None = None,
         interpreter: Interpreter | None = None,
         trilium: Trilium | None = None,
     ):
@@ -59,9 +59,13 @@ class InkBridge:
         self._poll_lock = asyncio.Lock()
 
     @property
-    def transport(self) -> Transport:
+    def transport(self) -> CloudTransport:
         if self._transport is None:
-            self._transport = make_transport(self.settings, cache=self.store)
+            s = self.settings
+            self._transport = CloudTransport(
+                s.rm_device_token, s.rm_auth_host, s.rm_sync_host,
+                cache=self.store, notifications_url=s.rm_notifications_url,
+            )
         return self._transport
 
     @property

@@ -15,14 +15,11 @@ def _env(name: str, default: str = "") -> str:
 @dataclass(frozen=True)
 class Settings:
     # reMarkable
-    rm_transport: str = field(default_factory=lambda: _env("RM_TRANSPORT", "cloud"))
     rm_device_token: str = field(default_factory=lambda: _env("RM_DEVICE_TOKEN"))
     rm_auth_host: str = field(
         default_factory=lambda: _env("RM_AUTH_HOST", "https://webapp-prod.cloud.remarkable.engineering")
     )
     rm_sync_host: str = field(default_factory=lambda: _env("RM_SYNC_HOST", "https://internal.cloud.remarkable.com"))
-    rm_ssh_host: str = field(default_factory=lambda: _env("RM_SSH_HOST", "10.11.99.1"))
-    rm_ssh_key: str = field(default_factory=lambda: _env("RM_SSH_KEY"))
     # Width of a page in .rm coordinate units; strokes are mapped onto the PDF width with it.
     # 1404 on reMarkable 2; calibrate on the Paper Pro during M0.
     rm_page_width_units: float = field(default_factory=lambda: float(_env("RM_PAGE_WIDTH_UNITS", "1404")))
@@ -48,7 +45,7 @@ class Settings:
     # The poller wakes on the cloud's notifications websocket (one message per sync). Empty derives
     # wss://<sync host>/notifications/ws/json/1; "off" disables it and the poller just polls.
     rm_notifications_url: str = field(default_factory=lambda: _env("RM_NOTIFICATIONS_URL"))
-    # Poll interval while there is no websocket (SSH transport, "off", or disconnected). An idle poll
+    # Poll interval while there is no websocket ("off", or disconnected). An idle poll
     # is one GET of the root pointer (listings and index blobs are cached), so poll often.
     poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "60")))
     # Safety-net poll while the websocket is up, in case a notification is lost.

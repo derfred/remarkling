@@ -1,5 +1,5 @@
 """Document state: doc ID -> source, reMarkable UUID, status, Trilium note ID, feedback; plus a
-key-value cache the transports use for immutable data (see `Store.cache_get_many`).
+key-value cache the cloud client uses for immutable data (see `Store.cache_get_many`).
 
 `Store` is the interface the pipeline uses. Two backends implement it with the same SQL:
 `SQLiteStore` (a file under DATA_DIR; the default, and what tests use) and `PostgresStore`
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS docs (
   source_kind     TEXT NOT NULL,      -- html | markdown | pdf | url | artifact | external
   source_ref      TEXT,
   rm_uuid         TEXT,
-  rm_hash         TEXT,               -- transport-specific version of the last processed download
+  rm_hash         TEXT,               -- cloud index hash of the last processed download
   status          TEXT NOT NULL,      -- pushed | pulled | external
   trilium_note_id TEXT,
   trilium_url     TEXT,

@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from uuid import uuid4
 
-from inkbridge.core.transport.base import RemoteDoc, RmDoc, pdf_content
+from inkbridge.core.cloud import RemoteDoc, pdf_content
+from inkbridge.core.rmdoc import RmDoc
 
 
 class MemoryTransport:
