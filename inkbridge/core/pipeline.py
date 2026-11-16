@@ -18,7 +18,7 @@ from . import render
 from .interpret import Interpreter, slice_strips
 from .overlay import overlay
 from .store import Doc, Store, now, open_store
-from .transport import RemoteDoc, Transport, make_transport
+from .transport import RemoteDoc, RmDoc, Transport, make_transport
 from .trilium import Trilium
 
 log = logging.getLogger(__name__)
@@ -99,7 +99,11 @@ class InkBridge:
         ready_selector: str | None = None,
         source_kind: str | None = None,
         source_ref: str | None = None,
+        parent: str | None = None,
+        folder_path: str | None = None,
     ) -> PushResult:
+        """Render and upload. Lands in the Inbox folder, or in the folder UUID `parent` (cloud only),
+        whose path `folder_path` is for the reported tablet paths."""
         given = [k for k, v in {"html": html, "markdown": markdown, "pdf": pdf, "url": url}.items() if v]
         if len(given) != 1:
             raise ValueError("pass exactly one of html, markdown, pdf or url")
@@ -119,7 +123,10 @@ class InkBridge:
         paths = []
         for part in parts:
             name = render.tablet_title(title, part.doc_id, part.part, part.parts)
-            rm_uuid = await self.transport.upload_pdf(part.pdf, name, self.settings.inbox_folder)
+            if parent is None:
+                rm_uuid = await self.transport.upload_pdf(part.pdf, name, self.settings.inbox_folder)
+            else:
+                rm_uuid = await self.transport.upload_pdf(part.pdf, name, self.settings.inbox_folder, parent=parent)
             d = self.doc_dir(part.doc_id)
             render.write(d / "original.pdf", part.pdf)
             self.store.upsert(Doc(
@@ -127,7 +134,8 @@ class InkBridge:
                 source_kind=source_kind or kind, source_ref=source_ref or url,
                 rm_uuid=rm_uuid, status="pushed", pushed_at=now(), dir=str(d),
             ))
-            paths.append(f"/{self.settings.inbox_folder}/{name}")
+            folder = folder_path if parent is not None and folder_path is not None else f"/{self.settings.inbox_folder}"
+            paths.append(f"{folder.rstrip('/')}/{name}")
         return PushResult(base_id, title, paths, [p.doc_id for p in parts])
 
     # --- pull -------------------------------------------------------------------------------
@@ -158,14 +166,6 @@ class InkBridge:
             return None
 
         rmdoc = await self.transport.download(remote)
-        ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units)
-        # Notebooks (and EPUBs) have no PDF: their "original" is the rendering without ink,
-        # i.e. the template and any typed text.
-        original = rmdoc.pdf or ov.text_pdf
-        if rmdoc.pdf is None:
-            log.info("%s has no PDF (%s); using its rendered pages", remote.name,
-                     rmdoc.content.get("fileType") or "notebook")
-
         doc_id = (render.read_id(rmdoc.pdf) if rmdoc.pdf else None) or render.id_from_title(remote.name)
         doc = self.store.get(doc_id) if doc_id else None
         if doc is None:
@@ -180,15 +180,7 @@ class InkBridge:
         title = remote.name if external else doc.title
 
         d = self.doc_dir(doc.doc_id)
-        render.write(d / "original.pdf", original)
-        render.write(d / "annotated.pdf", ov.annotated_pdf)
-        render.write(d / "annotated.png", ov.png)
-        for old in d.glob("strip-*.png"):
-            old.unlink()
-        for s in slice_strips(ov, original):
-            render.write(d / f"strip-{s.index:02d}.png", s.png)
-
-        interpreted = await self.interpreter.interpret(ov, original, title)
+        ov, original, interpreted = await self.analyze(rmdoc, title, d)
         feedback = {
             "doc_id": doc.doc_id,
             "title": title,
@@ -220,6 +212,42 @@ class InkBridge:
         self.store.upsert(doc)
         await self.transport.move(remote, self.settings.archive_folder)
         return PulledDoc(doc.doc_id, title, feedback["summary"], doc.trilium_url, len(feedback["marks"]), external)
+
+    async def analyze(self, rmdoc: RmDoc, title: str, d: Path):
+        """Overlay the ink, write original/annotated PDFs and page strips to `d`, and interpret the
+        marks with Claude. Returns (overlay, original PDF, interpretation)."""
+        ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units)
+        # Notebooks (and EPUBs) have no PDF: their "original" is the rendering without ink,
+        # i.e. the template and any typed text.
+        original = rmdoc.pdf or ov.text_pdf
+        if rmdoc.pdf is None:
+            log.info("%s has no PDF (%s); using its rendered pages", title,
+                     rmdoc.content.get("fileType") or "notebook")
+        render.write(d / "original.pdf", original)
+        render.write(d / "annotated.pdf", ov.annotated_pdf)
+        render.write(d / "annotated.png", ov.png)
+        for old in d.glob("strip-*.png"):
+            old.unlink()
+        for strip in slice_strips(ov, original):
+            render.write(d / f"strip-{strip.index:02d}.png", strip.png)
+        return ov, original, await self.interpreter.interpret(ov, original, title)
+
+    async def annotations_of(self, uuid: str, version: str, title: str, refresh: bool = False
+                             ) -> tuple[dict[str, Any], list[Path]]:
+        """Interpreted marks of any document on the tablet, read where it is (nothing is moved or
+        filed). Kept per document version, so asking again costs nothing until the ink changes."""
+        d = self.settings.data_dir / "library" / uuid
+        cached = d / "feedback.json"
+        if not refresh and cached.exists():
+            feedback = json.loads(cached.read_text())
+            if feedback.get("version") == version:
+                return feedback, sorted(d.glob("strip-*.png"))
+        rmdoc = await self.transport.download(RemoteDoc(uuid, title, ""))
+        _, _, interpreted = await self.analyze(rmdoc, title, d)
+        feedback = {"uuid": uuid, "version": version, "title": title,
+                    **{k: interpreted[k] for k in ("highlights", "marks", "free_notes", "summary")}}
+        cached.write_text(json.dumps(feedback, indent=2, ensure_ascii=False))
+        return feedback, sorted(d.glob("strip-*.png"))
 
     # --- queries ----------------------------------------------------------------------------
 

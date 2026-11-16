@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ...config import Settings
-from .base import Cache, RemoteDoc, RmDoc, Transport
+from .base import Cache, LibraryEntry, RemoteDoc, RmDoc, Transport
 
 
 def make_transport(settings: Settings, cache: Cache | None = None) -> Transport:
@@ -22,4 +22,4 @@ def make_transport(settings: Settings, cache: Cache | None = None) -> Transport:
     raise ValueError(f"unknown RM_TRANSPORT {settings.rm_transport!r}")
 
 
-__all__ = ["Cache", "RemoteDoc", "RmDoc", "Transport", "make_transport"]
+__all__ = ["Cache", "LibraryEntry", "RemoteDoc", "RmDoc", "Transport", "make_transport"]

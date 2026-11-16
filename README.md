@@ -28,8 +28,9 @@ inkbridge/
     trilium.py     # ETAPI note per doc; re-pull updates in place
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
-    pipeline.py    # push_document(), poll_outbox()
-  mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
+    library.py     # the library for the MCP tools: paths, lookup by UUID/path/ID, MCP_FOLDERS scope
+    pipeline.py    # push_document(), poll_outbox(), annotations_of() for any document
+  mcp_server.py    # MCP tools: browse/read/annotations/strokes of any document; push, organise, trash
   api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp, bearer-token auth
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll_outbox() on cloud websocket notifications (timer fallback)
@@ -253,5 +254,31 @@ Approximations to check against the tablet (M0):
 
 Add `https://<host>/mcp` as a custom connector in claude.ai. The endpoint takes `Authorization:
 Bearer <MCP_TOKEN>`, or `?token=<MCP_TOKEN>` in the URL for clients that cannot set headers.
+The tools cover the whole library, not just the documents Ink Bridge pushed, and need the cloud
+transport. Documents are addressed by UUID, path (`/Work/Meeting notes`), Ink Bridge ID
+(`rm-xxxxxx`) or a unique name.
+
+| Tool | | |
+|---|---|---|
+| `list_documents` | read | list a folder or search by name; filter by kind, tag, modified since |
+| `get_document` | read | metadata and the pages in tablet order: ink, highlights, typed text, PDF page |
+| `read_document` | read | the text layer per page: PDF text, typed text, highlighted passages |
+| `get_pages` | read | pages as images with the ink drawn in (or without); tall pages come as tiles |
+| `get_strokes` | read | raw pen data: tool, colour, thickness, points with pressure/width/speed/direction |
+| `get_annotations` | read | the handwriting interpreted into feedback JSON plus inked strips |
+| `push_document` | write | HTML, Markdown, PDF or URL into a new document in any folder |
+| `create_folder` | write | `mkdir -p` |
+| `update_document` | write | rename, move, pin, tags (also restores from the trash) |
+| `trash_document` | write | move to the tablet's trash; nothing is ever deleted |
+| `process_outbox` | write | the Outbox pull, as the poller runs it |
+
+No tool changes a document's pages or ink. `get_annotations` on a document that did not come back
+through the Outbox interprets its ink where it is (nothing moved or filed) and keeps the result in
+`DATA_DIR/library/<uuid>/` until the ink changes.
+
+- `MCP_ACCESS=read` leaves the write tools out (default `write`).
+- `MCP_FOLDERS=/Work,/Inbox` confines every tool to those folders: anything outside, the trash
+  included, cannot be found, listed, moved into or pushed to. Empty means the whole library.
+
 To push an artifact, Claude reads it with its own artifact tools and calls
 `push_document(html=...)`. The server can't fetch private artifacts itself.

@@ -45,7 +45,9 @@
   // keys of the same name in `secretName`. Poller knobs: RM_NOTIFICATIONS_URL
   // (cloud websocket; 'off' for timer polling), POLL_FALLBACK_S, POLL_INTERVAL_S.
   // Behind an OAuth proxy, API_AUTH_HEADER (e.g. 'X-Auth-Request-Email') lets the
-  // web UI use the proxy's session for /api/ instead of API_TOKEN.
+  // web UI use the proxy's session for /api/ instead of API_TOKEN. MCP tools:
+  // MCP_ACCESS ('read' leaves out the write tools) and MCP_FOLDERS (e.g.
+  // '/Work,/Inbox' confines them to those folders).
   env: {},
 
   // DATA_DIR: rendered documents (original/annotated PDFs, the page strips

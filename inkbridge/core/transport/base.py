@@ -22,6 +22,16 @@ class RemoteDoc:
 
 
 @dataclass
+class LibraryEntry:
+    """A document or folder as the library lists it: no payloads, just .metadata and .content."""
+
+    uuid: str
+    version: str  # changes whenever anything in the document changes
+    metadata: dict = field(default_factory=dict)
+    content: dict = field(default_factory=dict)
+
+
+@dataclass
 class RmDoc:
     """The unpacked contents of a .rmdoc: a document's files keyed by name relative to its UUID."""
 
@@ -112,6 +122,12 @@ class Transport(Protocol):
 
     async def aclose(self) -> None: ...
 
+    # Optional, cloud only: the whole library and edits to it, for the MCP library tools.
+    #     async def entries(self) -> list[LibraryEntry]
+    #     async def create_folder(self, name: str, parent: str) -> str
+    #     async def update(self, doc_uuid: str, metadata: dict | None = None, content: dict | None = None)
+    #     async def upload_pdf(self, pdf, visible_name, folder, parent: str | None = None) -> str
+    #
     # Optional: a transport that can push change notifications also implements
     #     def notifications(self) -> AbstractAsyncContextManager[AsyncIterator[dict]]
     # entered once connected, yielding one dict per remote change and ending when the connection
