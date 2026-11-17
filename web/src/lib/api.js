@@ -3,7 +3,7 @@ export class AuthError extends Error {}
 // The auth proxy in front of the app owns the session: its cookie rides along on every same-origin
 // fetch. A 401, or a redirect to its sign-in page, means the session has lapsed, so reload the page
 // and let the proxy sign the user in again. A second failure right after a reload is not a lapsed
-// session (e.g. the server lacks API_AUTH_HEADER) and shows as an error instead of looping.
+// session (e.g. the proxy does not cover /api/) and shows as an error instead of looping.
 const RELOADED = "remarkling.authReload";
 
 function reauthenticate() {

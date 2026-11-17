@@ -3,12 +3,6 @@
 //
 //   local remarkling = import 'github.com/derfred/remarkling/deploy/jsonnet/main.libsonnet';
 //   remarkling.objects(remarkling.config { host: 'remarkling.example.com' })
-//
-// What this library deliberately does NOT render, because the platform owns it:
-//   - the Namespace,
-//   - any Secret with a value: the app's credentials arrive as the Secret
-//     `secretName`, and the database URL as `database.secretName`,
-//   - RBAC.
 {
   name: 'remarkling',
   namespace: 'remarkling',
@@ -19,7 +13,7 @@
   version: std.stripChars(importstr 'VERSION', ' \n'),
   image: 'ghcr.io/derfred/remarkling:' + self.version,
 
-  // Public hostname. Also the default for MCP_ALLOWED_HOSTS.
+  // Public hostname. With the Service's in-cluster names, the default for MCP_ALLOWED_HOSTS.
   host: error 'remarkling: config.host must be set',
 
   ingress: {
@@ -33,7 +27,7 @@
 
   // Every key of this Secret becomes an env var of both containers (see
   // inkbridge/config.py). Credentials: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY,
-  // API_TOKEN, MCP_TOKEN, TRILIUM_ETAPI_TOKEN. Created by the platform.
+  // TRILIUM_ETAPI_TOKEN. Created by the platform.
   secretName: 'remarkling-secrets',
 
   // Postgres: DATABASE_URL from this Secret and key (the CloudNativePG
@@ -44,23 +38,13 @@
   // { TRILIUM_URL: 'http://trilium.trilium.svc.cluster.local' }. They win over
   // keys of the same name in `secretName`. Poller knobs: RM_NOTIFICATIONS_URL
   // (cloud websocket; 'off' for timer polling), POLL_FALLBACK_S, POLL_INTERVAL_S.
-  // Behind an OAuth proxy, API_AUTH_HEADER (e.g. 'X-Auth-Request-Email') lets the
-  // web UI use the proxy's session for /api/ instead of API_TOKEN.
   env: {},
 
   // DATA_DIR: rendered documents (original/annotated PDFs, the page strips
   // get_annotations returns as images), the lock the two containers poll
   // under, and the SQLite file when `database` is null.
-  //
-  // By default an emptyDir: with Postgres, nothing on it has to outlive the
-  // pod. A restart only drops the files, so get_annotations then returns the
-  // feedback of earlier documents without their strip images.
-  //
-  // persistent: true makes it a PersistentVolumeClaim `claimName` instead,
-  // which SQLite needs. ReadWriteOnce, hence one pod and the Recreate strategy;
-  // the storage class can't change once the claim exists.
   storage: {
-    persistent: false,
+    persistent: false,  // persistent: true makes it a PersistentVolumeClaim `claimName` instead
     size: '1Gi',  // emptyDir sizeLimit, or the claim's request
     claimName: 'remarkling-data',
     storageClass: null,  // null: the cluster's default class
