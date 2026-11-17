@@ -94,8 +94,6 @@ def ui_dir(tmp_path, monkeypatch):
 @pytest.fixture
 def client(filled, ui_dir, tmp_path, monkeypatch):
     store, spec, _ = filled
-    monkeypatch.setenv("API_TOKEN", "phone")
-    monkeypatch.setenv("MCP_TOKEN", "chat")
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     config.get_settings.cache_clear()
     bridge = pipeline.InkBridge(config.get_settings(), store, MemoryTransport(), FakeInterpreter())
@@ -108,9 +106,7 @@ def client(filled, ui_dir, tmp_path, monkeypatch):
     config.get_settings.cache_clear()
 
 
-def test_api_requires_token_but_ui_does_not(client):
-    assert client.get("/api/cache").status_code == 401
-    assert client.get("/api/cache", headers={"Authorization": "Bearer chat"}).status_code == 401
+def test_ui_files(client):
     r = client.get("/ui/")
     assert r.status_code == 200 and 'id="app"' in r.text
     assert r.headers["cache-control"] == "no-cache"
@@ -130,17 +126,16 @@ def test_ui_not_built(client, ui_dir, monkeypatch):
 
 
 def test_api_routes(client):
-    auth = {"Authorization": "Bearer phone"}
-    assert client.get("/api/cache", headers=auth).json()["library"]["documents"] == 2
-    items = client.get("/api/cache/library", headers=auth).json()["items"]
+    assert client.get("/api/cache").json()["library"]["documents"] == 2
+    items = client.get("/api/cache/library").json()["items"]
     assert items[0]["type"] == "folder"  # folders first
-    assert client.get(f"/api/cache/library/{client.spec}", headers=auth).json()["name"] == "Spec · rm-abcdef"
-    assert client.get("/api/cache/library/nope", headers=auth).status_code == 404
-    blobs = client.get("/api/cache/blobs?kind=root", headers=auth).json()
+    assert client.get(f"/api/cache/library/{client.spec}").json()["name"] == "Spec · rm-abcdef"
+    assert client.get("/api/cache/library/nope").status_code == 404
+    blobs = client.get("/api/cache/blobs?kind=root").json()
     assert blobs["total"] == 1
-    assert client.get("/api/cache/blobs/" + blobs["items"][0]["key"], headers=auth).json()["kind"] == "root"
-    assert client.get("/api/cache/blobs/cloud.blob:none", headers=auth).status_code == 404
-    assert client.get("/api/cache/blobs?kind=bogus", headers=auth).status_code == 422
+    assert client.get("/api/cache/blobs/" + blobs["items"][0]["key"]).json()["kind"] == "root"
+    assert client.get("/api/cache/blobs/cloud.blob:none").status_code == 404
+    assert client.get("/api/cache/blobs?kind=bogus").status_code == 422
 
 
 async def test_sync_fills_the_cache_including_content():
@@ -170,5 +165,4 @@ async def test_sync_fills_the_cache_including_content():
 
 
 def test_sync_needs_the_cloud_transport(client):
-    assert client.post("/api/cache/sync").status_code == 401
-    assert client.post("/api/cache/sync", headers={"Authorization": "Bearer phone"}).status_code == 501
+    assert client.post("/api/cache/sync").status_code == 501

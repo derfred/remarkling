@@ -19,7 +19,12 @@
   version: std.stripChars(importstr 'VERSION', ' \n'),
   image: 'ghcr.io/derfred/remarkling:' + self.version,
 
-  // Public hostname. Also the default for MCP_ALLOWED_HOSTS.
+  // Public hostname. With the Service's in-cluster names, the default for
+  // MCP_ALLOWED_HOSTS.
+  //
+  // The app does no authentication: anyone who reaches it can use it. Protect
+  // the Ingress (e.g. an auth proxy via `ingress.annotations`) and in-cluster
+  // access (NetworkPolicy, a mesh). Realms by path: /mcp; /api/, /push, /poll.
   host: error 'remarkling: config.host must be set',
 
   ingress: {
@@ -33,7 +38,7 @@
 
   // Every key of this Secret becomes an env var of both containers (see
   // inkbridge/config.py). Credentials: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY,
-  // API_TOKEN, MCP_TOKEN, TRILIUM_ETAPI_TOKEN. Created by the platform.
+  // TRILIUM_ETAPI_TOKEN. Created by the platform.
   secretName: 'remarkling-secrets',
 
   // Postgres: DATABASE_URL from this Secret and key (the CloudNativePG
@@ -44,8 +49,6 @@
   // { TRILIUM_URL: 'http://trilium.trilium.svc.cluster.local' }. They win over
   // keys of the same name in `secretName`. Poller knobs: RM_NOTIFICATIONS_URL
   // (cloud websocket; 'off' for timer polling), POLL_FALLBACK_S, POLL_INTERVAL_S.
-  // Behind an OAuth proxy, API_AUTH_HEADER (e.g. 'X-Auth-Request-Email') lets the
-  // web UI use the proxy's session for /api/ instead of API_TOKEN.
   env: {},
 
   // DATA_DIR: rendered documents (original/annotated PDFs, the page strips

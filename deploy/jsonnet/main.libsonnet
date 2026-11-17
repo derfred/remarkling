@@ -16,9 +16,15 @@
     local labels = { 'app.kubernetes.io/name': cfg.name };
     local meta(name) = { name: name, namespace: cfg.namespace, labels: labels };
 
+    // The public host, and the Service's names for in-cluster MCP clients.
+    local allowedHosts = [cfg.host] + [
+      std.join('.', [cfg.name] + suffix)
+      for suffix in [[], [cfg.namespace], [cfg.namespace, 'svc'], [cfg.namespace, 'svc', 'cluster', 'local']]
+    ];
     local env =
       [{ name: 'DATA_DIR', value: '/data' }]
-      + (if std.objectHas(cfg.env, 'MCP_ALLOWED_HOSTS') then [] else [{ name: 'MCP_ALLOWED_HOSTS', value: cfg.host }])
+      + (if std.objectHas(cfg.env, 'MCP_ALLOWED_HOSTS') then []
+         else [{ name: 'MCP_ALLOWED_HOSTS', value: std.join(',', allowedHosts) }])
       + [{ name: k, value: cfg.env[k] } for k in std.objectFields(cfg.env)]
       // Deliberately not optional: a missing Secret or key stops the pods
       // (CreateContainerConfigError) instead of silently falling back to SQLite.

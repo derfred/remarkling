@@ -30,7 +30,7 @@ inkbridge/
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), poll_outbox()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
-  api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp, bearer-token auth
+  api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll_outbox() on cloud websocket notifications (timer fallback)
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
@@ -117,8 +117,8 @@ library and moves the pin when a new release appears.
   Namespace, no Secret and no RBAC: the deployment provides those.
 - **Credentials** come from the Secret named by `secretName` (default `remarkling-secrets`).
   Every key becomes an env var (`inkbridge/config.py`): `RM_DEVICE_TOKEN`, `ANTHROPIC_API_KEY`,
-  `API_TOKEN`, `MCP_TOKEN`, and for Trilium `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE`.
-  Non-secret settings go in the library's `env`. `MCP_ALLOWED_HOSTS` defaults to the hostname.
+  and for Trilium `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE`. Non-secret settings go in the
+  library's `env`. `MCP_ALLOWED_HOSTS` defaults to the hostname plus the Service's in-cluster names.
   Env is read only at start, so restart the Deployment after a credential changes.
 - **Postgres.** By default `DATABASE_URL` comes from the Secret `postgres-app`, key `uri`: what
   CloudNativePG generates for a Cluster named `postgres`. Point `database` at another Secret, or
@@ -150,27 +150,38 @@ holds the rendered and annotated files and the cross-container poll lock; a SQLi
 it too, so both containers see the same one, and then the volume has to be persistent. Switching
 does not migrate existing rows.
 
+## Access control
+
+The app does no authentication: whoever can reach it can use every route. Access is the
+infrastructure's job, so it can differ per realm and per path into the cluster (external through
+the Ingress, internal through the Service):
+
+| Realm   | Paths                                                     | Typical clients                     |
+| ------- | --------------------------------------------------------- | ----------------------------------- |
+| API     | `/api/`, `/push`, `/poll` (and `/docs`, `/openapi.json`)  | web UI, iPhone Shortcuts, REST      |
+| MCP     | `/mcp`                                                    | claude.ai connector, in-cluster agents |
+| public  | `/healthz`, `/`, `/ui/`                                   | probes; the UI's static files (no data) |
+
+Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations).
+Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
+Without either, the app is open to the internet or to every pod in the cluster.
+
 ## iPhone Shortcuts (M6)
 
 - **Pull reMarkable**: Get Contents of URL, POST `https://<host>/poll`, header
-  `Authorization: Bearer <API_TOKEN>` → Get Dictionary Value `count`, `titles` → if count > 0, Show
+  whatever credentials the Ingress asks for on `/poll` → Get Dictionary Value `count`, `titles` → if count > 0, Show
   Notification "Pulled N: titles" (optionally open `trilium_url`), else "Nothing in Outbox".
 - **Send to reMarkable**: Show in Share Sheet for URLs and PDFs; POST `https://<host>/push` as a form
-  with `url` or `file` (and optional `title`), same header.
+  with `url` or `file` (and optional `title`), same credentials.
 
 ## Cache explorer
 
 `https://<host>/ui/` is a mobile-first web UI for the cloud blob cache: browse the library as the
 last cloud listing saw it (folders, documents, pages, which files are cached, Ink Bridge status),
 the raw cache entries by kind (root, index, metadata, content), and cache stats. The page itself
-is public and holds no data. It has no login of its own: it relies on the OAuth proxy in front of the
-app (e.g. oauth2-proxy via the Ingress `annotations`) and sends its session cookie with every API
-call. Set `API_AUTH_HEADER` to the header the proxy sets on authenticated requests (oauth2-proxy:
-`X-Auth-Request-Email`, passed on with `nginx.ingress.kubernetes.io/auth-response-headers`); a
-non-empty value then admits `/api/` requests without `API_TOKEN`. The proxy must cover `/api/` and
-overwrite that header there, or anyone could send it. When the session lapses the UI reloads to
-sign in again. It is
-read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
+holds no data. It has no login of its own: it relies on the auth proxy in front of the app (see
+Access control) and sends its session cookie with every API call. When the session lapses (a 401
+or a redirect to the proxy's sign-in) the UI reloads to sign in again. It is read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
 the cache with the current root, fetching any index, `.metadata` or `.content` blob it lacks (a poll
 skips `.content`, which holds page counts and file types). Blobs already cached cost no request.
 
@@ -178,11 +189,9 @@ The UI is a Svelte 5 app styled with Tailwind CSS 4, in `web/`. `npm run build` 
 `inkbridge/web/`, which the server serves at `/ui/` (fingerprinted `assets/` cached for good,
 `index.html` never); without a build, `/ui/` answers 503. The Docker image builds it in a Node stage.
 For UI work, run `inkbridge serve` on :8000 and `npm run dev` in `web/`: Vite serves the app on
-http://localhost:5173/ui/ with hot reload and proxies `/api` to the server, adding
-`X-Auth-Request-Email` in place of the OAuth proxy (start the server with
-`API_AUTH_HEADER=X-Auth-Request-Email`).
+http://localhost:5173/ui/ with hot reload and proxies `/api` to the server.
 
-The same data is a REST API with `Authorization: Bearer <API_TOKEN>` (or the proxy's session):
+The same data is a REST API:
 
 | Route                           | Returns                                                         |
 | ------------------------------- | --------------------------------------------------------------- |
@@ -251,7 +260,7 @@ Approximations to check against the tablet (M0):
 
 ## Claude connector (M7)
 
-Add `https://<host>/mcp` as a custom connector in claude.ai. The endpoint takes `Authorization:
-Bearer <MCP_TOKEN>`, or `?token=<MCP_TOKEN>` in the URL for clients that cannot set headers.
+Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials the
+Ingress asks for on `/mcp` (see Access control).
 To push an artifact, Claude reads it with its own artifact tools and calls
 `push_document(html=...)`. The server can't fetch private artifacts itself.
