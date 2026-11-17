@@ -3,12 +3,6 @@
 //
 //   local remarkling = import 'github.com/derfred/remarkling/deploy/jsonnet/main.libsonnet';
 //   remarkling.objects(remarkling.config { host: 'remarkling.example.com' })
-//
-// What this library deliberately does NOT render, because the platform owns it:
-//   - the Namespace,
-//   - any Secret with a value: the app's credentials arrive as the Secret
-//     `secretName`, and the database URL as `database.secretName`,
-//   - RBAC.
 {
   name: 'remarkling',
   namespace: 'remarkling',
@@ -19,12 +13,7 @@
   version: std.stripChars(importstr 'VERSION', ' \n'),
   image: 'ghcr.io/derfred/remarkling:' + self.version,
 
-  // Public hostname. With the Service's in-cluster names, the default for
-  // MCP_ALLOWED_HOSTS.
-  //
-  // The app does no authentication: anyone who reaches it can use it. Protect
-  // the Ingress (e.g. an auth proxy via `ingress.annotations`) and in-cluster
-  // access (NetworkPolicy, a mesh). Realms by path: /mcp; /api/, /push, /poll.
+  // Public hostname. With the Service's in-cluster names, the default for MCP_ALLOWED_HOSTS.
   host: error 'remarkling: config.host must be set',
 
   ingress: {
@@ -54,16 +43,8 @@
   // DATA_DIR: rendered documents (original/annotated PDFs, the page strips
   // get_annotations returns as images), the lock the two containers poll
   // under, and the SQLite file when `database` is null.
-  //
-  // By default an emptyDir: with Postgres, nothing on it has to outlive the
-  // pod. A restart only drops the files, so get_annotations then returns the
-  // feedback of earlier documents without their strip images.
-  //
-  // persistent: true makes it a PersistentVolumeClaim `claimName` instead,
-  // which SQLite needs. ReadWriteOnce, hence one pod and the Recreate strategy;
-  // the storage class can't change once the claim exists.
   storage: {
-    persistent: false,
+    persistent: false,  // persistent: true makes it a PersistentVolumeClaim `claimName` instead
     size: '1Gi',  // emptyDir sizeLimit, or the claim's request
     claimName: 'remarkling-data',
     storageClass: null,  // null: the cluster's default class

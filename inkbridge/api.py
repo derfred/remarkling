@@ -32,7 +32,6 @@ from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
-# The cache explorer UI: a Svelte app in web/, built into here by `npm run build` (not in git).
 UI_DIR = Path(__file__).parent / "web"
 
 

@@ -3,10 +3,6 @@
 //   local remarkling = import 'github.com/derfred/remarkling/deploy/jsonnet/main.libsonnet';
 //   remarkling.objects(remarkling.config { host: 'remarkling.example.com' })
 //
-// objects(cfg) returns a flat list: Deployment (server + poller), Service,
-// a PVC with cfg.storage.persistent, and an Ingress unless cfg.ingress.enabled
-// is false. See config.libsonnet
-// for every setting and for what the library leaves to the platform.
 {
   config:: import 'config.libsonnet',
 
