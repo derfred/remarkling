@@ -1,12 +1,12 @@
 """Both Store backends against the same expectations. Postgres runs when TEST_DATABASE_URL is set
-(it drops and recreates the `docs` and `cache` tables there, so point it at a throwaway database)."""
+(it drops and recreates the `docs`, `cache` and `schema_version` tables there, so point it at a throwaway database)."""
 
 import os
 
 import pytest
 
 from inkbridge.config import Settings
-from inkbridge.core.store import Doc, PostgresStore, SQLiteStore, open_store, sqlite_path
+from inkbridge.core.store import MIGRATIONS, Doc, PostgresStore, SQLiteStore, migrate, open_store, sqlite_path
 
 PG_URL = os.environ.get("TEST_DATABASE_URL", "")
 
@@ -21,7 +21,7 @@ def store(request):
         import psycopg
 
         with psycopg.connect(PG_URL, autocommit=True) as conn:
-            conn.execute("DROP TABLE IF EXISTS docs, cache")
+            conn.execute("DROP TABLE IF EXISTS docs, cache, schema_version")
         s = PostgresStore(PG_URL)
     yield s
     s.close()
@@ -50,6 +50,48 @@ def test_queries(store):
     assert [d.doc_id for d in store.returned(limit=1)] == ["rm-cccccc"]
     assert {d.doc_id for d in store.older_than(20)} == {"rm-bbbbbb.2"}
     assert store.mint_id() not in {"rm-bbbbbb", "rm-cccccc"}
+
+
+def test_schema_version_is_recorded(store):
+    assert store._fetch("SELECT version FROM schema_version") == [{"version": len(MIGRATIONS)}]
+
+
+def test_migrations_apply_once_in_order():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+    steps = ["CREATE TABLE t (a {float})", "ALTER TABLE t ADD COLUMN b TEXT; INSERT INTO t (a, b) VALUES (1.5, 'x')"]
+    assert migrate(conn.execute, "REAL", steps[:1]) == 1
+    assert migrate(conn.execute, "REAL", steps) == 2
+    assert migrate(conn.execute, "REAL", steps) == 2  # nothing left to run
+    assert [tuple(r) for r in conn.execute("SELECT a, b FROM t")] == [(1.5, "x")]
+    assert conn.execute("SELECT version FROM schema_version").fetchall()[0][0] == 2
+
+
+def test_failed_sqlite_migration_rolls_back(tmp_path, monkeypatch):
+    from inkbridge.core import store as store_mod
+
+    path = tmp_path / "x.sqlite3"
+    SQLiteStore(path).close()
+    monkeypatch.setattr(store_mod, "MIGRATIONS", MIGRATIONS + ["CREATE TABLE extra (a TEXT); SELECT nope FROM missing"])
+    with pytest.raises(Exception, match="missing"):
+        SQLiteStore(path)
+    monkeypatch.setattr(store_mod, "MIGRATIONS", MIGRATIONS)
+    s = SQLiteStore(path)
+    assert s._fetch("SELECT version FROM schema_version") == [{"version": len(MIGRATIONS)}]
+    assert not s._fetch("SELECT name FROM sqlite_master WHERE name = 'extra'")
+    s.close()
+
+
+def test_database_newer_than_code_is_refused(tmp_path):
+    path = tmp_path / "x.sqlite3"
+    s = SQLiteStore(path)
+    s._execute("UPDATE schema_version SET version = ?", (len(MIGRATIONS) + 1,))
+    s.close()
+    with pytest.raises(RuntimeError, match="newer than this release"):
+        SQLiteStore(path)
 
 
 def test_cache(store):

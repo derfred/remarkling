@@ -150,6 +150,13 @@ holds the rendered and annotated files and the cross-container poll lock; a SQLi
 it too, so both containers see the same one, and then the volume has to be persistent. Switching
 does not migrate existing rows.
 
+Schema changes are migrations: `SCHEMA` in `store.py` is the v0.2.1 baseline, and `MIGRATIONS` is an
+append-only list of SQL steps applied in order on start, each once and in its own transaction, with
+the count applied kept in `schema_version`. Both backends run the same steps; Postgres under an
+advisory lock, SQLite under `BEGIN IMMEDIATE`, so a server and poller starting together don't race.
+A database migrated by a newer release is refused rather than used. To change the schema, append a
+step (and update `Doc`/`_COLUMNS`); never edit one that has shipped.
+
 ## Access control
 
 The app does no authentication: whoever can reach it can use every route. Access is the
