@@ -1,5 +1,5 @@
 """Document state: doc ID -> source, reMarkable UUID, status, Trilium note ID, feedback; plus a
-key-value cache the transports use for immutable data (see `Store.cache_get_many`).
+key-value cache the cloud client uses for immutable data (see `Store.cache_get_many`).
 
 `Store` is the interface the pipeline uses. Two backends implement it with the same SQL:
 `SQLiteStore` (a file under DATA_DIR; the default, and what tests use) and `PostgresStore`
@@ -16,15 +16,16 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Sequence
 
 if TYPE_CHECKING:
     from ..config import Settings
 
 BASE32 = "abcdefghijklmnopqrstuvwxyz234567"
 
-# {float} is REAL on SQLite (8 bytes) and DOUBLE PRECISION on Postgres (whose REAL is 4 bytes,
-# too coarse for epoch timestamps).
+# The schema as of v0.2.1, the baseline every database starts from. Do not edit it: change the
+# schema by appending to MIGRATIONS. {float} is REAL on SQLite (8 bytes) and DOUBLE PRECISION on
+# Postgres (whose REAL is 4 bytes, too coarse for epoch timestamps).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
   doc_id          TEXT PRIMARY KEY,   -- rm-xxxxxx, rm-xxxxxx.2 for split parts, ext-... for unknown docs
@@ -33,7 +34,7 @@ CREATE TABLE IF NOT EXISTS docs (
   source_kind     TEXT NOT NULL,      -- html | markdown | pdf | url | artifact | external
   source_ref      TEXT,
   rm_uuid         TEXT,
-  rm_hash         TEXT,               -- transport-specific version of the last processed download
+  rm_hash         TEXT,               -- cloud index hash of the last processed download
   status          TEXT NOT NULL,      -- pushed | pulled | external
   trilium_note_id TEXT,
   trilium_url     TEXT,
@@ -49,7 +50,15 @@ CREATE TABLE IF NOT EXISTS cache (
   value      TEXT NOT NULL,            -- JSON
   created_at {float} NOT NULL
 );
+CREATE TABLE IF NOT EXISTS schema_version (
+  version INTEGER NOT NULL            -- how many MIGRATIONS have been applied; one row
+);
 """
+
+# Schema changes after the baseline, applied in order on start, each once and in its own
+# transaction (see `migrate`). Append only: never edit or reorder a step that has shipped. A step
+# is one or more `;`-separated statements and may use {float}. Keep `--` out of string literals.
+MIGRATIONS: list[str] = []
 
 # Rows per IN (...) list; far below SQLite's and Postgres's parameter limits.
 _CHUNK = 500
@@ -194,6 +203,15 @@ class SQLiteStore(Store):
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA.format(float="REAL"))
+        # BEGIN IMMEDIATE takes the write lock up front, so a server and poller starting on the same
+        # file migrate one after the other; SQLite DDL is transactional, so a failed step rolls back.
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            migrate(self._conn.execute, "REAL")
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
 
     def _fetch(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
@@ -227,6 +245,7 @@ class PostgresStore(Store):
             self._conn.execute("SELECT pg_advisory_xact_lock(hashtext('inkbridge.schema'))")
             for stmt in _statements(SCHEMA.format(float="DOUBLE PRECISION")):
                 self._conn.execute(stmt)
+            migrate(self._conn.execute, "DOUBLE PRECISION")
 
     def _connect(self):
         return self._psycopg.connect(self._url, autocommit=True, row_factory=self._row_factory)
@@ -296,6 +315,28 @@ def sqlite_path(url: str) -> str:
     if "?" in rest:
         raise ValueError("sqlite URLs take no query parameters")
     return rest[1:]
+
+
+def migrate(execute: Callable[[str], Any], float_type: str, migrations: Sequence[str] | None = None) -> int:
+    """Apply the migrations not yet recorded in schema_version; return the resulting version.
+
+    `execute` runs one statement on a connection the caller holds a transaction (and, on Postgres,
+    the schema lock) on, so the steps and the version bump commit or roll back together.
+    """
+    migrations = MIGRATIONS if migrations is None else migrations
+    rows = execute("SELECT version FROM schema_version").fetchall()
+    if not rows:
+        execute("INSERT INTO schema_version (version) VALUES (0)")
+    current = rows[0]["version"] if rows else 0
+    if current > len(migrations):
+        raise RuntimeError(
+            f"database schema is at version {current}, newer than this release knows ({len(migrations)})"
+        )
+    for version, step in enumerate(migrations[current:], start=current + 1):
+        for stmt in _statements(step.format(float=float_type)):
+            execute(stmt)
+        execute(f"UPDATE schema_version SET version = {version}")
+    return len(migrations)
 
 
 def _statements(script: str) -> list[str]:

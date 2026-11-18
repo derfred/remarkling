@@ -6,7 +6,7 @@ from inkbridge import config
 from inkbridge.core import pipeline
 from inkbridge.core.explorer import CacheSnapshot
 from inkbridge.core.store import Doc, SQLiteStore
-from inkbridge.core.transport.cloud import CACHE_PREFIX, CloudTransport
+from inkbridge.core.cloud import CACHE_PREFIX, CloudTransport
 from fakes import FakeInterpreter, MemoryTransport
 from rmfixtures import sample_pdf
 from test_cloud import FakeCloud
@@ -163,6 +163,3 @@ async def test_sync_fills_the_cache_including_content():
     assert (await t.sync())["fetched"] == 0
     await client.aclose()
 
-
-def test_sync_needs_the_cloud_transport(client):
-    assert client.post("/api/cache/sync").status_code == 501
