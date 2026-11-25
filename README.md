@@ -136,13 +136,15 @@ library and moves the pin when a new release appears.
   })
   ```
 
-  That gives the Deployment, Service and Ingress (nginx and cert-manager by default). Every
-  setting and its default is in `deploy/jsonnet/config.libsonnet`. The library renders no
-  Namespace, no Secret and no RBAC: the deployment provides those.
+  That gives the Deployment and the Service (`<name>.<namespace>`, port 80). Every setting and
+  its default is in `deploy/jsonnet/config.libsonnet`. The library renders no Ingress, no
+  Namespace, no Secret and no RBAC: the deployment provides those, and decides whether and how
+  the Service is exposed (see Access control). `host` is optional: the public hostname, if the
+  Service is exposed under one, so `/mcp` accepts it.
 - **Credentials** come from the Secret named by `secretName` (default `remarkling-secrets`).
   Every key becomes an env var (`inkbridge/config.py`): `RM_DEVICE_TOKEN`, `ANTHROPIC_API_KEY`,
   and for Trilium `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE`. Non-secret settings go in the
-  library's `env`. `MCP_ALLOWED_HOSTS` defaults to the hostname plus the Service's in-cluster names.
+  library's `env`. `MCP_ALLOWED_HOSTS` defaults to `host` (if set) plus the Service's in-cluster names.
   Env is read only at start, so restart the Deployment after a credential changes.
 - **Postgres.** By default `DATABASE_URL` comes from the Secret `postgres-app`, key `uri`: what
   CloudNativePG generates for a Cluster named `postgres`. Point `database` at another Secret, or
@@ -154,8 +156,7 @@ library and moves the pin when a new release appears.
 
 One Deployment (`Recreate`), two containers (`server`, `poller`) sharing the data volume. Polls are
 serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered
-files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store. The public hostname
-needs a DNS record pointing at the cluster's ingress.
+files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store.
 
 Document state (doc IDs, reMarkable UUIDs, status, Trilium links, feedback JSON) lives in the
 database `DATABASE_URL` names; its tables are created on start:
@@ -184,8 +185,8 @@ step (and update `Doc`/`_COLUMNS`); never edit one that has shipped.
 ## Access control
 
 The app does no authentication: whoever can reach it can use every route. Access is the
-infrastructure's job, so it can differ per realm and per path into the cluster (external through
-the Ingress, internal through the Service):
+infrastructure's job, outside this repo, so it can differ per realm and per path into the cluster
+(external through whatever exposes the Service, internal through the Service itself):
 
 | Realm   | Paths                                                     | Typical clients                     |
 | ------- | --------------------------------------------------------- | ----------------------------------- |
@@ -198,18 +199,22 @@ Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingr
 except the upload realm: its URLs carry their own credential, a token signed with a key in
 `DATA_DIR/upload.key` that expires after `UPLOAD_TTL_S` (15 min) and works for one upload. So
 whatever exposes the app must let `/upload/` through without the API realm's auth (agents' shells
-have no browser session). That is the infrastructure's to set up, outside this repo: with
-ingress-nginx, a separate Ingress for the `/upload/` prefix without the auth annotations; with
-oauth2-proxy, `--skip-auth-route=^/upload/`. Inside the cluster no Ingress is needed: set
-`PUBLIC_URL` to the Service URL (`http://remarkling.<namespace>.svc.cluster.local`), so
-`create_upload` hands out URLs that reach it.
+have no browser session): with ingress-nginx, a separate Ingress for the `/upload/` prefix
+without the auth annotations; with oauth2-proxy, `--skip-auth-route=^/upload/`. Its body size
+limit should allow `UPLOAD_MAX_MB` (50 MB).
+
+`create_upload` builds its URL from the request that reached `/mcp`: `X-Forwarded-Proto`,
+`X-Forwarded-Host` and `X-Forwarded-Prefix` if the proxy sets them (ingress-nginx does), else the
+`Host` header. An agent connected through the public host gets a public URL, one connected
+through the Service a Service URL, so it needs no configuration in or out of the cluster.
+`PUBLIC_URL` overrides it, for a proxy that rewrites the host without saying so.
 Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
 Without either, the app is open to the internet or to every pod in the cluster.
 
 ## iPhone Shortcuts (M6)
 
 - **Pull reMarkable**: Get Contents of URL, POST `https://<host>/poll`, header
-  whatever credentials the Ingress asks for on `/poll` → Get Dictionary Value `count`, `titles` → if count > 0, Show
+  whatever credentials your proxy asks for on `/poll` → Get Dictionary Value `count`, `titles` → if count > 0, Show
   Notification "Pulled N: titles" (optionally open `trilium_url`), else "Nothing in Outbox".
 - **Send to reMarkable**: Show in Share Sheet for URLs and PDFs; POST `https://<host>/push` as a form
   with `url` or `file` (and optional `title`), same credentials.
@@ -299,8 +304,8 @@ Approximations to check against the tablet (M0):
 
 ## Claude connector (M7)
 
-Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials the
-Ingress asks for on `/mcp` (see Access control).
+Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials your
+proxy asks for on `/mcp` (see Access control).
 To push an artifact, Claude reads it with its own artifact tools and calls
 `push_document(html=...)`. The server can't fetch private artifacts itself.
 

@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver import Context, Image, MCPServer
 
 from .config import get_settings
 from .core.pipeline import NotOnTablet, get_bridge
@@ -88,8 +88,31 @@ async def push_document(
     return {"doc_id": result.doc_id, "tablet_path": result.tablet_paths, "parts": result.parts}
 
 
+def _first(value: str | None) -> str:
+    """The first entry of a forwarded header; proxies chained behind each other append theirs."""
+    return (value or "").split(",")[0].strip()
+
+
+def request_base_url(request) -> str:
+    """The base URL a client used to reach this app, as the proxy in front of it reports it.
+
+    Through a public proxy that is the public URL; called through the Service, the Service URL. The
+    Host header is checked by the MCP endpoint when MCP_ALLOWED_HOSTS is set; the forwarded
+    headers come from whatever proxy the infrastructure puts in front.
+    """
+    if request is None:
+        return ""
+    h = request.headers
+    host = _first(h.get("x-forwarded-host")) or h.get("host", "")
+    if not host:
+        return ""
+    proto = _first(h.get("x-forwarded-proto")) or request.url.scheme
+    prefix = _first(h.get("x-forwarded-prefix")).rstrip("/")
+    return f"{proto}://{host}{prefix}"
+
+
 @mcp.tool()
-async def create_upload(title: str, kind: str | None = None, ready_selector: str | None = None) -> dict:
+async def create_upload(title: str, ctx: Context, kind: str | None = None, ready_selector: str | None = None) -> dict:
     """A one-time URL to push a file from a shell, so its bytes never pass through your context.
 
     Send the file with the returned command (`curl -sS -T <file> <url>`); the response is the
@@ -98,13 +121,18 @@ async def create_upload(title: str, kind: str | None = None, ready_selector: str
     after expires_in_s and works once (a failed upload can be retried with it).
     """
     settings = get_settings()
-    if not settings.base_url:
-        return {"error": "The server has no PUBLIC_URL (or MCP_ALLOWED_HOSTS) to build upload URLs from."}
+    try:
+        request = ctx.request_context.request
+    except ValueError:  # called outside an HTTP request
+        request = None
+    base = settings.public_url or request_base_url(request)
+    if not base:
+        return {"error": "No base URL for uploads: set PUBLIC_URL, or call this over HTTP."}
     try:
         token, grant = get_uploads().create(title, kind, ready_selector)
     except ValueError as e:
         return {"error": str(e)}
-    url = f"{settings.base_url}/upload/{token}"
+    url = f"{base}/upload/{token}"
     return {
         "upload_url": url,
         "command": f"curl -sS --fail-with-body -T <file> '{url}'",
