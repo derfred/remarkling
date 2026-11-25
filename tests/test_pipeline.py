@@ -233,3 +233,140 @@ async def test_failure_while_storing_is_recorded_and_others_still_pulled(bridge)
     result = await bridge.poll_outbox()
     assert [p.doc_id for p in result.pulled] == [second.doc_id]
     assert [(f.doc_id, f.stage, f.error) for f in result.failed] == [(first.doc_id, "save", "OSError: disk full")]
+
+
+# --- tracked documents -------------------------------------------------------------------------
+
+
+async def test_pull_document_where_it_is_and_track_its_ink(bridge):
+    t = bridge.transport
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    uuid = bridge.store.get(pushed.doc_id).rm_uuid
+
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert status["location"] == "/Inbox" and status["on_tablet"] and not status["has_new_ink"]
+    assert (await bridge.poll()).changed == []
+
+    t.annotate(uuid, rm_page([line([(-200, 300), (200, 320)])]), move_to=None)
+    t.open(uuid)  # a new version without new ink
+    result = await bridge.poll()
+    assert [(c.doc_id, c.changed_pages) for c in result.changed] == [(pushed.doc_id, 1)]
+    assert result.pulled == []  # nothing in the Outbox
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert status["has_new_ink"] and status["changed_pages"] == [1]
+    assert [d["doc_id"] for d in await bridge.list_documents(changed_only=True)] == [pushed.doc_id]
+
+    [pulled] = await bridge.pull_document(pushed.doc_id)
+    assert pulled.new and pulled.strips and pulled.interpretation == "pending"
+    await bridge.drain()  # interpretation runs in the background
+    stored = bridge.store.get(pushed.doc_id)
+    assert stored.status == "pulled" and stored.interpret_status == "done" and stored.location == "/Inbox"
+    assert t.moves == 0 and len(await t.list_folder("Inbox")) == 1  # left where it was
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert not status["has_new_ink"] and status["changed_pages"] == []
+    assert await bridge.list_documents(changed_only=True) == []
+
+    # Unchanged ink: nothing is fetched again.
+    t.open(uuid)
+    [again] = await bridge.pull_document(pushed.doc_id)
+    assert not again.new and again.interpretation == "done"
+    assert (await bridge.poll()).changed == []
+
+    # More ink: pulled again.
+    t.annotate(uuid, rm_page([line([(-200, 300), (200, 320)]), line([(0, 500), (50, 520)])]), move_to=None)
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert status["has_new_ink"]
+    [fresh] = await bridge.pull_document(pushed.doc_id)
+    assert fresh.new
+    await bridge.drain()
+
+
+async def test_pulled_doc_later_moved_to_outbox_is_only_archived(bridge):
+    t = bridge.transport
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    uuid = bridge.store.get(pushed.doc_id).rm_uuid
+    t.annotate(uuid, rm_page([line([(0, 300), (10, 310)])]), move_to=None)
+    await bridge.pull_document(pushed.doc_id)
+    await bridge.drain()
+    pulled_at = bridge.store.get(pushed.doc_id).pulled_at
+
+    await t.move(t._state(uuid), "Outbox")
+    result = await bridge.poll()
+    # The move gave it a new version, so the Outbox pulls it again; its ink is unchanged.
+    assert [p.doc_id for p in result.pulled] == [pushed.doc_id] and result.changed == []
+    assert bridge.store.get(pushed.doc_id).pulled_at >= pulled_at
+    assert bridge.store.get(pushed.doc_id).location == "/Archive"
+    assert len(await t.list_folder("Archive")) == 1
+
+
+async def test_pull_document_failure_is_recorded(bridge, monkeypatch):
+    t = bridge.transport
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+
+    async def broken(remote):
+        raise OSError("connection reset")
+
+    monkeypatch.setattr(t, "download", broken)
+    [failed] = await bridge.pull_document(pushed.doc_id)
+    assert failed.stage == "download" and failed.attempts == 1
+    [failed] = await bridge.pull_document(pushed.doc_id)  # on request: no backoff
+    assert failed.attempts == 2
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert status["status"] == "failed" and status["failure"]["error"] == "OSError: connection reset"
+
+
+async def test_remove_document_trashes_and_stops_tracking(bridge):
+    t = bridge.transport
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    uuid = bridge.store.get(pushed.doc_id).rm_uuid
+    t.annotate(uuid, rm_page([line([(0, 300), (10, 310)])]), move_to=None)
+    await bridge.pull_document(pushed.doc_id)
+    await bridge.drain()
+
+    assert await bridge.remove_document(pushed.doc_id) == [pushed.doc_id]
+    assert t.docs[uuid][0].parent == "trash"
+    assert await bridge.list_documents() == []
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert not status["on_tablet"] and status["location"] is None
+    feedback, images = bridge.get_annotations(pushed.doc_id)  # what was pulled stays
+    assert images and feedback[0]["marks"]
+    with pytest.raises(pipeline.NotOnTablet):
+        await bridge.pull_document(pushed.doc_id)
+    assert await bridge.remove_document(pushed.doc_id) == [pushed.doc_id]  # idempotent
+    with pytest.raises(LookupError):
+        await bridge.remove_document("rm-zzzzzz")
+
+
+async def test_doc_deleted_on_the_tablet_is_marked_removed(bridge):
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    del bridge.transport.docs[bridge.store.get(pushed.doc_id).rm_uuid]
+    await bridge.poll()
+    assert bridge.store.get(pushed.doc_id).removed_at is not None
+    assert bridge.store.tracked() == []
+
+
+async def test_doc_pulled_before_ink_tracking_is_not_reported_as_new(bridge):
+    t = bridge.transport
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    uuid = bridge.store.get(pushed.doc_id).rm_uuid
+    t.annotate(uuid, rm_page([line([(0, 300), (10, 310)])]))
+    await bridge.poll()
+    bridge.store.update(pushed.doc_id, ink_seen=None, ink_pulled=None)  # as migration 2 leaves it
+
+    assert (await bridge.poll()).changed == []
+    [status] = await bridge.document_status(pushed.doc_id)
+    assert not status["has_new_ink"] and status["location"] == "/Archive"
+
+
+async def test_interpretation_result_is_dropped_if_the_doc_was_pulled_again(bridge, monkeypatch):
+    t = bridge.transport
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    uuid = bridge.store.get(pushed.doc_id).rm_uuid
+    t.annotate(uuid, rm_page([line([(0, 300), (10, 310)])]), move_to=None)
+    await bridge.pull_document(pushed.doc_id)
+    doc = bridge.store.get(pushed.doc_id)
+    bridge.store.update(pushed.doc_id, pulled_at=doc.pulled_at + 1)  # a pull landed meanwhile
+
+    await bridge._interpret(doc)
+    assert bridge.store.get(pushed.doc_id).interpret_status == "pending"
+    await bridge.drain()

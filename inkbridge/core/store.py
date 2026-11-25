@@ -73,6 +73,15 @@ MIGRATIONS: list[str] = [
     ALTER TABLE docs ADD COLUMN interpret_attempts INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE docs ADD COLUMN interpret_failed_at {float}
     """,
+    # 2: tracked documents. A pushed doc is followed wherever it is on the tablet: each check
+    # records its ink (page ID -> .rm hash) and folder, so new ink shows without the Outbox.
+    """
+    ALTER TABLE docs ADD COLUMN ink_seen TEXT;                             -- JSON page ID -> .rm hash, at the last check
+    ALTER TABLE docs ADD COLUMN ink_pulled TEXT;                           -- JSON page ID -> .rm hash, of the last pull
+    ALTER TABLE docs ADD COLUMN ink_changed_at {float};                    -- when ink_seen last changed
+    ALTER TABLE docs ADD COLUMN location TEXT;                             -- folder on the tablet at the last check
+    ALTER TABLE docs ADD COLUMN removed_at {float}                         -- trashed or deleted; no longer checked
+    """,
 ]
 
 # Rows per IN (...) list; far below SQLite's and Postgres's parameter limits.
@@ -104,6 +113,11 @@ class Doc:
     interpret_error: str | None = None
     interpret_attempts: int = 0
     interpret_failed_at: float | None = None
+    ink_seen: dict[str, str] | None = None
+    ink_pulled: dict[str, str] | None = None
+    ink_changed_at: float | None = None
+    location: str | None = None
+    removed_at: float | None = None
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
@@ -117,7 +131,10 @@ _COLUMNS = [
     # migration 1
     "error", "error_stage", "error_version", "attempts", "failed_at",
     "interpret_status", "interpret_error", "interpret_attempts", "interpret_failed_at",
+    # migration 2
+    "ink_seen", "ink_pulled", "ink_changed_at", "location", "removed_at",
 ]
+_JSON_COLUMNS = {"feedback", "ink_seen", "ink_pulled"}
 
 
 class Store(ABC):
@@ -145,8 +162,7 @@ class Store(ABC):
                 return doc_id
 
     def upsert(self, doc: Doc) -> Doc:
-        values = [getattr(doc, c) for c in _COLUMNS]
-        values[_COLUMNS.index("feedback")] = json.dumps(doc.feedback) if doc.feedback is not None else None
+        values = [_to_column(c, getattr(doc, c)) for c in _COLUMNS]
         placeholders = ", ".join("?" for _ in _COLUMNS)
         updates = ", ".join(f"{c} = excluded.{c}" for c in _COLUMNS[1:])
         self._execute(
@@ -164,6 +180,28 @@ class Store(ABC):
 
     def by_rm_uuid(self, rm_uuid: str) -> Doc | None:
         return self._one("SELECT * FROM docs WHERE rm_uuid = ?", (rm_uuid,))
+
+    def update(self, doc_id: str, **fields: Any) -> None:
+        """Set some columns of one doc, leaving the rest as they are (unlike `upsert`)."""
+        unknown = set(fields) - set(_COLUMNS[1:])
+        if unknown:
+            raise ValueError(f"unknown columns {sorted(unknown)}")
+        if fields:
+            sets = ", ".join(f"{c} = ?" for c in fields)
+            self._execute(f"UPDATE docs SET {sets} WHERE doc_id = ?",
+                          [_to_column(c, v) for c, v in fields.items()] + [doc_id])
+
+    def tracked(self) -> list[Doc]:
+        """Docs on the tablet as far as we know: uploaded or pulled, and not removed since."""
+        return self._many("SELECT * FROM docs WHERE rm_uuid IS NOT NULL AND removed_at IS NULL ORDER BY doc_id", ())
+
+    def recent(self, limit: int = 20) -> list[Doc]:
+        """Tracked docs, the most recently active first (new ink, a pull or the push)."""
+        return self._many(
+            "SELECT * FROM docs WHERE rm_uuid IS NOT NULL AND removed_at IS NULL "
+            "ORDER BY COALESCE(ink_changed_at, pulled_at, pushed_at, 0) DESC, doc_id LIMIT ?",
+            (limit,),
+        )
 
     def delete(self, doc_id: str) -> None:
         self._execute("DELETE FROM docs WHERE doc_id = ?", (doc_id,))
@@ -387,10 +425,15 @@ def _statements(script: str) -> list[str]:
     return [s.strip() for s in "\n".join(lines).split(";") if s.strip()]
 
 
+def _to_column(name: str, value: Any) -> Any:
+    return json.dumps(value) if name in _JSON_COLUMNS and value is not None else value
+
+
 def _row_to_doc(row: dict[str, Any]) -> Doc:
     data = dict(row)
-    if data.get("feedback"):
-        data["feedback"] = json.loads(data["feedback"])
+    for c in _JSON_COLUMNS:
+        if data.get(c):
+            data[c] = json.loads(data[c])
     return Doc(**data)
 
 

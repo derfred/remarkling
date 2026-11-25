@@ -1,4 +1,4 @@
-"""Command line: inkbridge push | poll | inbox | register | serve | poller."""
+"""Command line: inkbridge push | pull | status | docs | poll | inbox | register | serve | poller."""
 
 from __future__ import annotations
 
@@ -50,6 +50,29 @@ async def _poll(args) -> None:
         await bridge.aclose()
 
 
+async def _pull(args) -> None:
+    from .core.pipeline import get_bridge
+
+    bridge = get_bridge()
+    try:
+        print(json.dumps([asdict(o) for o in await bridge.pull_document(args.doc_id, force=args.force)], indent=2))
+    finally:
+        await bridge.aclose()
+
+
+async def _status(args) -> None:
+    from .core.pipeline import get_bridge
+
+    bridge = get_bridge()
+    try:
+        if args.doc_id:
+            print(json.dumps(await bridge.document_status(args.doc_id), indent=2))
+        else:
+            print(json.dumps(await bridge.list_documents(changed_only=args.changed), indent=2))
+    finally:
+        await bridge.aclose()
+
+
 async def _inbox(args) -> None:
     from .core.pipeline import get_bridge
 
@@ -79,6 +102,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--title")
     p.add_argument("--ready-selector")
     p.set_defaults(func=_push)
+
+    p = sub.add_parser("pull", help="fetch a pushed doc's annotations from wherever it is on the tablet")
+    p.add_argument("doc_id")
+    p.add_argument("--force", action="store_true", help="pull even if the ink has not changed")
+    p.set_defaults(func=_pull)
+
+    p = sub.add_parser("status", help="tracked docs and whether they have new ink (one doc if given)")
+    p.add_argument("doc_id", nargs="?")
+    p.add_argument("--changed", action="store_true", help="only docs with ink not yet pulled")
+    p.set_defaults(func=_status)
 
     sub.add_parser("poll", help="process /Outbox now").set_defaults(func=_poll)
     sub.add_parser("inbox", help="list /Inbox").set_defaults(func=_inbox)
