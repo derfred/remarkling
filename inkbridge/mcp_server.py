@@ -27,13 +27,17 @@ mcp = MCPServer(
         "Sending (each way returns a doc_id; keep it, every later call needs it):\n"
         "- Text you wrote: push_document(markdown=...).\n"
         "- A Claude Docs doc: not through your artifact tools (they return its viewer, not its content). "
-        "Export the tab with the docs export tool as markdown (not html, which comes unstyled; not pdf), "
-        "decode it and pass the text to push_document(markdown=...); use create_upload only if the export "
-        "was saved to a file.\n"
+        "Export the tab with the docs export tool as markdown (not html, which comes unstyled; not pdf). "
+        "The export arrives as base64 in your context: decode it and pass the text to "
+        "push_document(markdown=...). Do not write the base64 to a file to upload it: typing it out costs "
+        "more than the text it holds, and one wrong character corrupts it.\n"
         "- Another artifact: its HTML (CSS and assets inlined), or its markdown.\n"
-        "- A file on disk, or content over ~50 KB: with a shell, create_upload(title, kind) and run the "
-        "curl command it returns, with <file> replaced by the path; the doc_id is in curl's output. "
-        "Without a shell, or if the URL is unreachable from it, pass markdown or HTML to push_document.\n\n"
+        "- A file on disk (one the user gave you, or a result your client saved to a file): with a shell, "
+        "create_upload(title, kind) and run the curl command it returns, with <file> replaced by the path; "
+        "the doc_id is in curl's output. Without a shell, or if the URL is unreachable from it, pass "
+        "markdown or HTML to push_document. create_upload saves context only when the bytes are already "
+        "on disk: content already in your context goes to push_document; over ~50 KB, write the text you "
+        "would have passed to a file and upload that.\n\n"
         "Getting annotations back: when the user says they are done, pull_document(doc_id). It fetches "
         "from the tablet, wherever the doc is, and returns the page strips as images, plus interpreted "
         "marks once interpretation is done; otherwise read the marks from the images yourself. "
@@ -123,7 +127,8 @@ def request_base_url(request) -> str:
 
 @mcp.tool()
 async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None) -> dict:
-    """A one-time URL to send a file from a shell, so its bytes never pass through your context.
+    """A one-time URL to send a file already on disk from a shell, so its bytes never pass through your
+    context. For content you already hold (an export, text you wrote), use push_document.
 
     kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
     or "pdf" (the default; keeps its pages, for files that only exist as PDF). ready_selector (HTML)
