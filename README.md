@@ -312,8 +312,11 @@ proxy asks for on `/mcp` (see Access control).
 The tablet works best with one tall scrolling page, which the server renders from markdown or
 HTML; a PDF keeps its own pages. So the server instructions tell Claude to send the source, never a
 PDF made from it: text it wrote as markdown, an artifact as its HTML (read with its own artifact
-tools; the server can't fetch private artifacts), a Claude Docs doc as its `html` or `markdown`
-export. A PDF goes only when a PDF is all there is.
+tools; the server can't fetch private artifacts), a Claude Docs doc as its `markdown` export. A
+PDF goes only when a PDF is all there is. (A Claude Docs doc read as an artifact is a viewer that
+renders the doc in the browser; its `html` export is a bare fragment without CSS, which renders
+with the browser's defaults: tables without borders. The `markdown` export gets the server's
+stylesheet.)
 
 Anything big goes around the model instead of through it: a `push_document` argument passes
 through Claude's output, which fails long before a large document is done. An agent with a shell
