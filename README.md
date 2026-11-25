@@ -124,7 +124,9 @@ library and moves the pin when a new release appears.
   run `scripts/release.sh [patch|minor|major]` on `main`. Either way, the commit is tested first.
   `pyproject.toml` keeps its own version.
 - **CI** (`.github/workflows/ci.yml`) runs the tests and checks the library on every push. It also
-  builds `sha-<full sha>` images for trying a commit out.
+  builds `sha-<full sha>` images for trying a commit out. **Clean up images**
+  (`.github/workflows/ghcr-cleanup.yml`) deletes them weekly once they are 30 days old; release
+  images and `latest` stay. Run it by hand for a dry run.
 - **Manifests.** The library in `deploy/jsonnet/` is dependency-free. Vendor it, e.g. with
   jsonnet-bundler (`jb install github.com/derfred/remarkling/deploy/jsonnet@vX.Y.Z`), and render it:
 
