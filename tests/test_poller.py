@@ -36,9 +36,9 @@ class CountingBridge:
         self.transport = transport
         self.polls = 0
 
-    async def poll_outbox(self):
+    async def poll(self):
         self.polls += 1
-        return []
+        return SimpleNamespace(pulled=[], failed=[])
 
     def prune(self):
         return 0

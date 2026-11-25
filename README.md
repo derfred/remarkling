@@ -5,11 +5,18 @@ by hand, then pull the markup back as structured feedback into Trilium and Claud
 
 ```
 push:  chat / Shortcut / CLI ─▶ render tall PDF + rm-xxxxxx ID ─▶ /Inbox on the tablet
-pull:  /Outbox ─▶ download .rmdoc ─▶ strokes over original ─▶ Claude vision per strip ─▶ feedback JSON
-                                                                 ├─▶ Trilium note (+ PDFs, labels)
-                                                                 └─▶ MCP get_annotations
-done:  doc moved to /Archive
+pull:      /Outbox ─▶ download .rmdoc ─▶ strokes over original ─▶ strips + highlights ─▶ /Archive
+interpret: pulled ink ─▶ Claude vision per strip ─▶ marks, notes, summary (optional)
+                                                   ├─▶ Trilium note (+ PDFs, labels)
+                                                   └─▶ MCP get_annotations (strips as images, always)
 ```
+
+Pulling needs only the reMarkable transport. Interpretation runs after it, on the files the pull
+saved (`ink.rmdoc` keeps the raw strokes), and only when `ANTHROPIC_API_KEY` is set; without it a
+pulled doc's interpretation is `off` and an agent reads the strip images itself. A failure in
+either stage is stored on the doc (stage, error, attempt count) and shown by `poll_now`,
+`list_returned` and `get_annotations`. The same version is retried after 1, 2, 4 ... minutes, at
+most every 6 hours; a new version (more ink) is retried at once.
 
 ## Layout
 
@@ -29,11 +36,11 @@ inkbridge/
     trilium.py     # ETAPI note per doc; re-pull updates in place
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
-    pipeline.py    # push_document(), poll_outbox()
+    pipeline.py    # push_document(), poll() = poll_outbox() (pull) + interpret_pending()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
   api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
-  poller.py        # poll_outbox() on cloud websocket notifications (timer fallback)
+  poller.py        # poll() on cloud websocket notifications (timer fallback)
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
 web/               # cache explorer UI: Svelte 5 + Tailwind CSS 4, built by Vite into inkbridge/web
 prompts/interpret.md
@@ -63,7 +70,7 @@ while the root hash is unchanged. An idle poll is a single `GET /sync/v4/root`.
 The poller does not poll on a timer when it can avoid it. It holds the cloud's notifications
 websocket open (`wss://<RM_SYNC_HOST>/notifications/ws/json/1`, override with `RM_NOTIFICATIONS_URL`).
 Every sync, including the tablet's, sends a message there, and each message triggers a
-`poll_outbox()` after a 2 s debounce. A reconnect also triggers one, to catch up on anything missed. While the
+`poll()` after a 2 s debounce. A reconnect also triggers one, to catch up on anything missed. While the
 socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket
 (`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.

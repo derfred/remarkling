@@ -38,4 +38,19 @@ async def test_round_trip_through_tools(bridge):
     assert any(getattr(b, "type", "") == "image" for b in blocks[1:])
 
     missing = _blocks(await mcp.call_tool("get_annotations", {"doc_id": "rm-zzzzzz"}))
-    assert "No pulled annotations" in missing[0].text
+    assert "No document rm-zzzzzz" in missing[0].text
+
+
+async def test_poll_now_reports_failures(bridge):
+    import json
+
+    uuid = await bridge.transport.upload_pdf(b"not a pdf", "Broken", "Outbox")
+
+    result = json.loads(_blocks(await mcp.call_tool("poll_now", {}))[0].text)
+    assert result["pulled"] == []
+    [failed] = result["failed"]
+    assert failed["rm_uuid"] == uuid and failed["stage"] == "render" and failed["attempts"] == 1
+
+    blocks = _blocks(await mcp.call_tool("get_annotations", {"doc_id": failed["doc_id"]}))
+    assert json.loads(blocks[0].text)["failure"]["stage"] == "render"
+    assert "No pulled annotations" in blocks[1].text

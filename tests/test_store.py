@@ -52,6 +52,38 @@ def test_queries(store):
     assert store.mint_id() not in {"rm-bbbbbb", "rm-cccccc"}
 
 
+def test_failed_and_interpret_queries(store):
+    store.upsert(Doc("rm-dddddd", "rm-dddddd", "D", "pdf", pulled_at=50, dir="/d", interpret_status="done"))
+    store.upsert(Doc("rm-eeeeee", "rm-eeeeee", "E", "pdf", status="failed", failed_at=70, error="boom", attempts=2))
+    store.upsert(Doc("rm-ffffff", "rm-ffffff", "F", "pdf", pulled_at=60, dir="/f", interpret_status="pending"))
+    store.upsert(Doc("rm-gggggg", "rm-gggggg", "G", "pdf", pulled_at=40, interpret_status="pending"))  # pruned
+
+    assert [d.doc_id for d in store.returned()] == ["rm-eeeeee", "rm-ffffff", "rm-dddddd", "rm-gggggg"]
+    assert store.get("rm-eeeeee").attempts == 2
+    assert [d.doc_id for d in store.interpret_due()] == ["rm-ffffff"]
+    store.delete("rm-ffffff")
+    assert store.get("rm-ffffff") is None
+
+
+def test_sqlite_adds_columns_to_an_old_table(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE docs (doc_id TEXT PRIMARY KEY, base_id TEXT NOT NULL, title TEXT NOT NULL, "
+                     "source_kind TEXT NOT NULL, source_ref TEXT, rm_uuid TEXT, rm_hash TEXT, status TEXT NOT NULL, "
+                     "trilium_note_id TEXT, trilium_url TEXT, pushed_at REAL, pulled_at REAL, feedback TEXT, dir TEXT)")
+        conn.execute("INSERT INTO docs (doc_id, base_id, title, source_kind, status) "
+                     "VALUES ('rm-old000', 'rm-old000', 'Old', 'pdf', 'pulled')")
+    store = SQLiteStore(path)
+    old = store.get("rm-old000")
+    assert old.attempts == 0 and old.interpret_status is None
+    old.error = "x"
+    store.upsert(old)
+    store.close()
+    assert SQLiteStore(path).get("rm-old000").error == "x"  # reopening does not migrate twice
+
+
 def test_schema_version_is_recorded(store):
     assert store._fetch("SELECT version FROM schema_version") == [{"version": len(MIGRATIONS)}]
 

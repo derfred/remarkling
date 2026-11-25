@@ -23,7 +23,7 @@ def client(tmp_path, monkeypatch):
 
 
 def test_healthz_is_open(client):
-    assert client.get("/healthz").json() == {"ok": True}
+    assert client.get("/healthz").json() == {"ok": True, "interpretation": "off"}
 
 
 def test_the_app_does_no_auth(client):
@@ -42,7 +42,7 @@ def test_push_pdf_then_poll(client):
     t = client.bridge.transport
     t.annotate(client.bridge.store.get(doc_id).rm_uuid, rm_page([line([(0, 300), (10, 310)])]))
     r = client.post("/poll")
-    assert r.json() == {"count": 1, "titles": ["spec"], "trilium_url": None}
+    assert r.json() == {"count": 1, "titles": ["spec"], "trilium_url": None, "failed": []}
     assert client.post("/poll").json()["count"] == 0
 
 

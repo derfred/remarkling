@@ -58,7 +58,22 @@ CREATE TABLE IF NOT EXISTS schema_version (
 # Schema changes after the baseline, applied in order on start, each once and in its own
 # transaction (see `migrate`). Append only: never edit or reorder a step that has shipped. A step
 # is one or more `;`-separated statements and may use {float}. Keep `--` out of string literals.
-MIGRATIONS: list[str] = []
+MIGRATIONS: list[str] = [
+    # 1: pull failures and interpretation state on the doc. docs.status gains "failed". A pull
+    # failure stays until a later pull of the doc succeeds; interpretation (handwriting -> marks)
+    # runs after the pull and keeps its own status.
+    """
+    ALTER TABLE docs ADD COLUMN error TEXT;                                -- last pull failure, "<type>: <message>"
+    ALTER TABLE docs ADD COLUMN error_stage TEXT;                          -- download | render | save
+    ALTER TABLE docs ADD COLUMN error_version TEXT;                        -- the rm_hash that failed
+    ALTER TABLE docs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;       -- consecutive failures of it
+    ALTER TABLE docs ADD COLUMN failed_at {float};
+    ALTER TABLE docs ADD COLUMN interpret_status TEXT;                     -- pending | done | failed | off
+    ALTER TABLE docs ADD COLUMN interpret_error TEXT;
+    ALTER TABLE docs ADD COLUMN interpret_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE docs ADD COLUMN interpret_failed_at {float}
+    """,
+]
 
 # Rows per IN (...) list; far below SQLite's and Postgres's parameter limits.
 _CHUNK = 500
@@ -80,6 +95,15 @@ class Doc:
     pulled_at: float | None = None
     feedback: dict[str, Any] | None = None
     dir: str | None = None
+    error: str | None = None
+    error_stage: str | None = None
+    error_version: str | None = None
+    attempts: int = 0
+    failed_at: float | None = None
+    interpret_status: str | None = None
+    interpret_error: str | None = None
+    interpret_attempts: int = 0
+    interpret_failed_at: float | None = None
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
@@ -90,6 +114,9 @@ class Doc:
 _COLUMNS = [
     "doc_id", "base_id", "title", "source_kind", "source_ref", "rm_uuid", "rm_hash", "status",
     "trilium_note_id", "trilium_url", "pushed_at", "pulled_at", "feedback", "dir",
+    # migration 1
+    "error", "error_stage", "error_version", "attempts", "failed_at",
+    "interpret_status", "interpret_error", "interpret_attempts", "interpret_failed_at",
 ]
 
 
@@ -138,10 +165,26 @@ class Store(ABC):
     def by_rm_uuid(self, rm_uuid: str) -> Doc | None:
         return self._one("SELECT * FROM docs WHERE rm_uuid = ?", (rm_uuid,))
 
+    def delete(self, doc_id: str) -> None:
+        self._execute("DELETE FROM docs WHERE doc_id = ?", (doc_id,))
+
     def returned(self, since: float | None = None, limit: int = 20) -> list[Doc]:
+        """Docs pulled, or failed to pull, since `since`; the most recent event first."""
         return self._many(
-            "SELECT * FROM docs WHERE pulled_at IS NOT NULL AND pulled_at >= ? ORDER BY pulled_at DESC LIMIT ?",
-            (since or 0, limit),
+            "SELECT * FROM docs WHERE (pulled_at IS NOT NULL AND pulled_at >= ?) "
+            "OR (failed_at IS NOT NULL AND failed_at >= ?) "
+            "ORDER BY COALESCE(failed_at, pulled_at) DESC LIMIT ?",
+            (since or 0, since or 0, limit),
+        )
+
+    def interpret_due(self) -> list[Doc]:
+        """Pulled docs whose interpretation has not run or failed, and whose files are still there.
+
+        The caller applies the retry backoff to the failed ones."""
+        return self._many(
+            "SELECT * FROM docs WHERE dir IS NOT NULL AND interpret_status IN ('pending', 'failed') "
+            "ORDER BY pulled_at",
+            (),
         )
 
     def older_than(self, cutoff: float) -> list[Doc]:
