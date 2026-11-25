@@ -196,8 +196,13 @@ the Ingress, internal through the Service):
 
 Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations),
 except the upload realm: its URLs carry their own credential, a token signed with a key in
-`DATA_DIR/upload.key` that expires after `UPLOAD_TTL_S` (15 min) and works for one upload. The
-jsonnet library gives `/upload/` its own Ingress without the auth annotations for that reason.
+`DATA_DIR/upload.key` that expires after `UPLOAD_TTL_S` (15 min) and works for one upload. So
+whatever exposes the app must let `/upload/` through without the API realm's auth (agents' shells
+have no browser session). That is the infrastructure's to set up, outside this repo: with
+ingress-nginx, a separate Ingress for the `/upload/` prefix without the auth annotations; with
+oauth2-proxy, `--skip-auth-route=^/upload/`. Inside the cluster no Ingress is needed: set
+`PUBLIC_URL` to the Service URL (`http://remarkling.<namespace>.svc.cluster.local`), so
+`create_upload` hands out URLs that reach it.
 Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
 Without either, the app is open to the internet or to every pod in the cluster.
 

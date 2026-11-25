@@ -23,9 +23,6 @@
     tlsSecretName: 'remarkling-tls',
     // Extra annotations, e.g. an auth proxy in front of the app.
     annotations: {},
-    // A second Ingress for /upload/ (create_upload's URLs), without `annotations`: the URL's
-    // signed token is the credential. Its own annotations, e.g. rate limits, go here.
-    uploads: { enabled: true, annotations: {} },
   },
 
   // Every key of this Secret becomes an env var of both containers (see
