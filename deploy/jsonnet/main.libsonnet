@@ -1,7 +1,7 @@
 // remarkling's Kubernetes objects, as a dependency-free jsonnet library.
 //
 //   local remarkling = import 'github.com/derfred/remarkling/deploy/jsonnet/main.libsonnet';
-//   remarkling.objects(remarkling.config { host: 'remarkling.example.com' })
+//   remarkling.objects(remarkling.config)
 //
 {
   config:: import 'config.libsonnet',
@@ -13,7 +13,7 @@
     local meta(name) = { name: name, namespace: cfg.namespace, labels: labels };
 
     // The public host, and the Service's names for in-cluster MCP clients.
-    local allowedHosts = [cfg.host] + [
+    local allowedHosts = (if cfg.host == null then [] else [cfg.host]) + [
       std.join('.', [cfg.name] + suffix)
       for suffix in [[], [cfg.namespace], [cfg.namespace, 'svc'], [cfg.namespace, 'svc', 'cluster', 'local']]
     ];
@@ -21,6 +21,8 @@
       [{ name: 'DATA_DIR', value: '/data' }]
       + (if std.objectHas(cfg.env, 'MCP_ALLOWED_HOSTS') then []
          else [{ name: 'MCP_ALLOWED_HOSTS', value: std.join(',', allowedHosts) }])
+      + (if cfg.publicUrl == null || std.objectHas(cfg.env, 'PUBLIC_URL') then []
+         else [{ name: 'PUBLIC_URL', value: cfg.publicUrl }])
       + [{ name: k, value: cfg.env[k] } for k in std.objectFields(cfg.env)]
       // Deliberately not optional: a missing Secret or key stops the pods
       // (CreateContainerConfigError) instead of silently falling back to SQLite.
@@ -111,30 +113,6 @@
            accessModes: ['ReadWriteOnce'],
            resources: { requests: { storage: cfg.storage.size } },
          } + (if cfg.storage.storageClass == null then {} else { storageClassName: cfg.storage.storageClass }),
-       }])
-    + (if !cfg.ingress.enabled then [] else [{
-         apiVersion: 'networking.k8s.io/v1',
-         kind: 'Ingress',
-         metadata: meta(cfg.name) + {
-           annotations: {
-             'cert-manager.io/cluster-issuer': cfg.ingress.clusterIssuer,
-             'nginx.ingress.kubernetes.io/ssl-redirect': 'true',
-             'nginx.ingress.kubernetes.io/proxy-body-size': '50m',
-             'nginx.ingress.kubernetes.io/proxy-read-timeout': '300',
-           } + cfg.ingress.annotations,
-         },
-         spec: {
-           ingressClassName: cfg.ingress.className,
-           tls: [{ hosts: [cfg.host], secretName: cfg.ingress.tlsSecretName }],
-           rules: [{
-             host: cfg.host,
-             http: { paths: [{
-               path: '/',
-               pathType: 'Prefix',
-               backend: { service: { name: cfg.name, port: { name: 'http' } } },
-             }] },
-           }],
-         },
        }])
   ),
 }

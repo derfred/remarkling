@@ -2,7 +2,7 @@
 // needs and passes the result to objects():
 //
 //   local remarkling = import 'github.com/derfred/remarkling/deploy/jsonnet/main.libsonnet';
-//   remarkling.objects(remarkling.config { host: 'remarkling.example.com' })
+//   remarkling.objects(remarkling.config)
 {
   name: 'remarkling',
   namespace: 'remarkling',
@@ -13,17 +13,17 @@
   version: std.stripChars(importstr 'VERSION', ' \n'),
   image: 'ghcr.io/derfred/remarkling:' + self.version,
 
-  // Public hostname. With the Service's in-cluster names, the default for MCP_ALLOWED_HOSTS.
-  host: error 'remarkling: config.host must be set',
+  // The library renders no Ingress: exposing the Service (Ingress, Gateway,
+  // auth proxy) is the deployment's job. `host` is the public hostname it is
+  // exposed under, if any; with the Service's in-cluster names it is the
+  // default for MCP_ALLOWED_HOSTS. null: in-cluster names only.
+  host: null,
 
-  ingress: {
-    enabled: true,
-    className: 'nginx',
-    clusterIssuer: 'letsencrypt-prod',
-    tlsSecretName: 'remarkling-tls',
-    // Extra annotations, e.g. an auth proxy in front of the app.
-    annotations: {},
-  },
+  // Base URL of the upload links create_upload hands out (PUBLIC_URL), e.g.
+  // 'https://remarkling.example.com'. null: taken from each MCP request
+  // (X-Forwarded-Proto/-Host/-Prefix, else Host), which suits most proxies.
+  // Set it when the proxy in front rewrites the host without forwarding it.
+  publicUrl: null,
 
   // Every key of this Secret becomes an env var of both containers (see
   // inkbridge/config.py). Credentials: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY,

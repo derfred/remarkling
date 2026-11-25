@@ -1,5 +1,5 @@
 """Both Store backends against the same expectations. Postgres runs when TEST_DATABASE_URL is set
-(it drops and recreates the `docs`, `cache` and `schema_version` tables there, so point it at a throwaway database)."""
+(it drops and recreates the `docs`, `cache`, `uploads` and `schema_version` tables there, so point it at a throwaway database)."""
 
 import os
 
@@ -21,7 +21,7 @@ def store(request):
         import psycopg
 
         with psycopg.connect(PG_URL, autocommit=True) as conn:
-            conn.execute("DROP TABLE IF EXISTS docs, cache, schema_version")
+            conn.execute("DROP TABLE IF EXISTS docs, cache, uploads, schema_version")
         s = PostgresStore(PG_URL)
     yield s
     s.close()
@@ -190,3 +190,17 @@ def test_update_and_tracked(store):
     assert [d.doc_id for d in store.tracked()] == ["rm-aaaaaa"]
     with pytest.raises(ValueError):
         store.update("rm-aaaaaa", nope=1)
+
+
+def test_upload_grants(store):
+    store.upload_create("h1", "Spec", "pdf", None, 1.0, 100.0)
+    assert store.upload_claim("h1", 50.0) is True
+    assert store.upload_claim("h1", 51.0) is False  # claimed
+    store.upload_release("h1")
+    assert store.upload_claim("h1", 101.0) is False  # expired
+    assert store.upload_claim("h1", 52.0) is True
+    store.upload_done("h1", "rm-aaaaaa")
+    store.upload_release("h1")  # pushed something: stays claimed
+    assert store.upload_get("h1")["doc_id"] == "rm-aaaaaa" and store.upload_get("h1")["claimed_at"] == 52.0
+    assert store.upload_claim("nope", 1.0) is False and store.upload_get("nope") is None
+    assert store.upload_prune(100.0) == 0 and store.upload_prune(101.0) == 1

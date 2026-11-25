@@ -7,25 +7,40 @@ import json
 from dataclasses import asdict
 from datetime import datetime, timezone
 
-from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver import Context, Image, MCPServer
 
+from .config import get_settings
 from .core.pipeline import NotOnTablet, get_bridge
+from .uploads import get_uploads
 
 MAX_IMAGES = 10
 
 mcp = MCPServer(
     name="Ink Bridge",
     instructions=(
-        "Ink Bridge sends documents to the user's reMarkable tablet and returns their handwritten "
-        "markup as structured feedback. To send a claude.ai artifact, read it with your artifact tools "
-        "and pass its full HTML (CSS and assets inlined) to push_document. Keep the doc ID it returns: "
-        "the document is tracked by it wherever the user files it, so they need not move it anywhere. "
-        "When the user says they annotated it, call pull_document with the doc ID: it returns the "
-        "annotated page strips as images, and the interpreted marks once interpretation is done; if "
-        "interpretation is pending, off or failed, read the marks from the images yourself. "
-        "document_status and list_documents tell whether a doc has ink not yet pulled, without pulling. "
-        "Documents the user moved to /Outbox are pulled by poll_now (that is the flow without a "
-        "conversation). If a pull fails, tell the user the error rather than retrying."
+        "Ink Bridge puts documents on the user's reMarkable tablet and brings back their handwritten "
+        "markup.\n\n"
+        "Layout: the tablet works best with one tall scrolling page, which the server renders from "
+        "markdown or HTML. A PDF is passed through with its own pages, so never make a PDF from content "
+        "that has a source: send the source and let the server render it. Send a PDF only when a PDF is "
+        "all there is (a paper, a scan, a file the user gave you).\n\n"
+        "Sending (each way returns a doc_id; keep it, every later call needs it):\n"
+        "- Text you wrote: push_document(markdown=...).\n"
+        "- A Claude Docs doc: not through your artifact tools (they return its viewer, not its content). "
+        "Export the tab with the docs export tool as markdown (not html, which comes unstyled; not pdf), "
+        "decode it and pass the text to push_document(markdown=...); use create_upload only if the export "
+        "was saved to a file.\n"
+        "- Another artifact: its HTML (CSS and assets inlined), or its markdown.\n"
+        "- A file on disk, or content over ~50 KB: with a shell, create_upload(title, kind) and run the "
+        "curl command it returns, with <file> replaced by the path; the doc_id is in curl's output. "
+        "Without a shell, or if the URL is unreachable from it, pass markdown or HTML to push_document.\n\n"
+        "Getting annotations back: when the user says they are done, pull_document(doc_id). It fetches "
+        "from the tablet, wherever the doc is, and returns the page strips as images, plus interpreted "
+        "marks once interpretation is done; otherwise read the marks from the images yourself. "
+        "get_annotations returns what was last pulled without contacting the tablet. document_status "
+        "and list_documents show whether a doc has new ink, without pulling.\n\n"
+        "poll_now, list_returned and list_inbox serve the Outbox flow, which needs no conversation; you "
+        "rarely need them. If a pull fails, tell the user the error rather than retrying it."
     ),
 )
 
@@ -62,10 +77,14 @@ async def push_document(
     url: str | None = None,
     ready_selector: str | None = None,
 ) -> dict:
-    """Render content to one tall scrolling PDF page and upload it to /Inbox on the tablet.
+    """Upload content to /Inbox on the tablet. Returns doc_id (keep it), tablet path and parts.
 
-    Pass exactly one of html, markdown, pdf_base64 or url (a public URL). ready_selector waits for
-    a CSS selector before rendering (JS-drawn charts, Mermaid). Returns the doc ID and tablet path.
+    Pass exactly one of markdown, html, url (a public page) or pdf_base64. Markdown, HTML and URLs
+    are rendered to one tall scrolling page, the layout the tablet works best with; very long
+    content is split at h2 headings into several docs ("parts"), all under the one doc_id. A PDF
+    keeps its own pages, so pass one only when no source exists, and only a small one: every byte
+    goes through your context. Files and anything over ~50 KB go through create_upload.
+    ready_selector (HTML, url) waits for a CSS selector before rendering: JS-drawn charts, Mermaid.
     """
     result = await get_bridge().push_document(
         title,
@@ -77,6 +96,64 @@ async def push_document(
         source_kind="artifact" if html else None,
     )
     return {"doc_id": result.doc_id, "tablet_path": result.tablet_paths, "parts": result.parts}
+
+
+def _first(value: str | None) -> str:
+    """The first entry of a forwarded header; proxies chained behind each other append theirs."""
+    return (value or "").split(",")[0].strip()
+
+
+def request_base_url(request) -> str:
+    """The base URL a client used to reach this app, as the proxy in front of it reports it.
+
+    Through a public proxy that is the public URL; called through the Service, the Service URL. The
+    Host header is checked by the MCP endpoint when MCP_ALLOWED_HOSTS is set; the forwarded
+    headers come from whatever proxy the infrastructure puts in front.
+    """
+    if request is None:
+        return ""
+    h = request.headers
+    host = _first(h.get("x-forwarded-host")) or h.get("host", "")
+    if not host:
+        return ""
+    proto = _first(h.get("x-forwarded-proto")) or request.url.scheme
+    prefix = _first(h.get("x-forwarded-prefix")).rstrip("/")
+    return f"{proto}://{host}{prefix}"
+
+
+@mcp.tool()
+async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None) -> dict:
+    """A one-time URL to send a file from a shell, so its bytes never pass through your context.
+
+    kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
+    or "pdf" (the default; keeps its pages, for files that only exist as PDF). ready_selector (HTML)
+    waits for a CSS selector before rendering.
+
+    Run the returned "command" with <file> replaced by the path. curl prints push_document's JSON:
+    keep its doc_id for pull_document. On an error it prints {"detail": ...}: 415 means the file
+    does not match kind (ask again with the right kind), 410 that the URL expired or was used
+    (ask for a new one). Other failures can be retried with the same URL until it expires
+    (expires_in_s). If the shell cannot reach the URL, use push_document instead.
+    """
+    settings = get_settings()
+    try:
+        request = ctx.request_context.request
+    except ValueError:  # called outside an HTTP request
+        request = None
+    base = settings.public_url or request_base_url(request)
+    if not base:
+        return {"error": "No base URL for uploads: set PUBLIC_URL, or call this over HTTP."}
+    try:
+        token, grant = get_uploads().create(title, kind, ready_selector)
+    except ValueError as e:
+        return {"error": str(e)}
+    url = f"{base}/upload/{token}"
+    return {
+        "upload_url": url,
+        "command": f"curl -sS --fail-with-body -T <file> '{url}'",
+        "expires_in_s": round(grant.expires - datetime.now(timezone.utc).timestamp()),
+        "max_mb": settings.upload_max_mb,
+    }
 
 
 @mcp.tool()
@@ -94,16 +171,17 @@ async def poll_now() -> dict:
 
 @mcp.tool()
 async def list_returned(since: str | None = None) -> list[dict]:
-    """Recently pulled documents, and ones that failed to pull, with status, interpretation state and
-    feedback summary. since: ISO date or datetime."""
+    """History of pulls (Outbox and pull_document, external docs included) and failed pulls, newest
+    first, with interpretation state and feedback summary. since: ISO date or datetime. For the docs
+    on the tablet and whether they have new ink, use list_documents."""
     return get_bridge().list_returned(_since(since))
 
 
 @mcp.tool()
 async def get_annotations(doc_id: str) -> list:
-    """State and feedback JSON for a document plus its annotated page strips as images.
+    """State and feedback JSON for a document plus its annotated page strips, as last pulled.
 
-    The strips and highlights are there as soon as the doc is pulled; marks, notes and summary once
+    Does not contact the tablet: for ink added since, use pull_document. The strips and highlights are there as soon as the doc is pulled; marks, notes and summary once
     "interpretation" is "done". A doc that failed to pull carries "failure" with the error.
     """
     return _annotations(doc_id)
@@ -158,5 +236,6 @@ async def remove_document(doc_id: str) -> dict:
 
 @mcp.tool()
 async def list_inbox() -> list[dict]:
-    """Documents waiting in /Inbox on the tablet."""
+    """Documents still in /Inbox on the tablet. To find a doc you pushed, use list_documents: the user
+    may have moved it."""
     return await get_bridge().list_inbox()

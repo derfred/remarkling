@@ -21,8 +21,8 @@ def _blocks(result):
 
 async def test_tools_listed():
     names = {t.name for t in await mcp.list_tools()}
-    assert names == {"push_document", "pull_document", "document_status", "list_documents", "remove_document",
-                     "poll_now", "list_returned", "get_annotations", "list_inbox"}
+    assert names == {"push_document", "create_upload", "pull_document", "document_status", "list_documents",
+                     "remove_document", "poll_now", "list_returned", "get_annotations", "list_inbox"}
 
 
 async def test_round_trip_through_tools(bridge):
@@ -55,6 +55,63 @@ async def test_poll_now_reports_failures(bridge):
     blocks = _blocks(await mcp.call_tool("get_annotations", {"doc_id": failed["doc_id"]}))
     assert json.loads(blocks[0].text)["failure"]["stage"] == "render"
     assert "No pulled annotations" in blocks[1].text
+
+
+async def test_create_upload(bridge, monkeypatch, tmp_path):
+    import json
+
+    from inkbridge import config, mcp_server, uploads
+
+    monkeypatch.setattr(mcp_server, "get_settings",
+                        lambda: config.Settings(data_dir=tmp_path, public_url="https://ink.test"))
+
+    result = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "Spec"}))[0].text)
+    assert result["upload_url"].startswith("https://ink.test/upload/")
+    assert result["command"].endswith(f"-T <file> '{result['upload_url']}'")
+    assert 0 < result["expires_in_s"] <= 900
+    token = result["upload_url"].rsplit("/", 1)[1]
+    assert uploads.get_uploads().claim(token).title == "Spec"
+
+    bad = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x", "kind": "docx"}))[0].text)
+    assert "kind must be" in bad["error"]
+    # No PUBLIC_URL and no HTTP request to take the URL from.
+    monkeypatch.setattr(mcp_server, "get_settings", lambda: config.Settings(data_dir=tmp_path))
+    none = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x"}))[0].text)
+    assert "PUBLIC_URL" in none["error"]
+
+
+@pytest.mark.parametrize("headers,expected", [
+    ({}, "http://testserver/upload/"),  # called through the Service: its own URL
+    ({"X-Forwarded-Proto": "https", "X-Forwarded-Host": "ink.example.com"}, "https://ink.example.com/upload/"),
+    ({"X-Forwarded-Proto": "https, http", "X-Forwarded-Host": "ink.example.com, inner",
+      "X-Forwarded-Prefix": "/remarkling/"}, "https://ink.example.com/remarkling/upload/"),
+])
+def test_create_upload_url_comes_from_the_request(tmp_path, monkeypatch, headers, expected):
+    import json
+
+    from starlette.testclient import TestClient
+
+    from inkbridge import config, uploads
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("PUBLIC_URL", raising=False)
+    monkeypatch.setattr(pipeline, "_bridge", pipeline.InkBridge(
+        config.Settings(data_dir=tmp_path), SQLiteStore(":memory:"), MemoryTransport()))
+    config.get_settings.cache_clear()
+    from inkbridge.api import create_app
+
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "create_upload", "arguments": {"title": "Spec"}}}
+    with TestClient(create_app()) as client:
+        r = client.post("/mcp", json=call, headers={
+            "Accept": "application/json, text/event-stream", "Content-Type": "application/json",
+            "MCP-Protocol-Version": "2025-06-18", **headers})
+    config.get_settings.cache_clear()
+    assert r.status_code == 200, r.text
+    body = r.json() if r.headers["content-type"].startswith("application/json") else json.loads(
+        next(line[5:] for line in r.text.splitlines() if line.startswith("data:")))
+    result = json.loads(body["result"]["content"][0]["text"])
+    assert result["upload_url"].startswith(expected), result
 
 
 async def test_pull_document_tool_returns_strips(bridge):

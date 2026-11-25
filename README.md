@@ -49,8 +49,9 @@ inkbridge/
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), pull_document(), check_ink(); poll() = poll_outbox() + check_ink() + interpret_pending()
-  mcp_server.py    # push_document, pull_document, document_status, list_documents, remove_document,
-                   # get_annotations, poll_now, list_returned, list_inbox
+  mcp_server.py    # push_document, create_upload, pull_document, document_status, list_documents,
+                   # remove_document, get_annotations, poll_now, list_returned, list_inbox
+  uploads.py       # one-time upload URLs, grants in the store (create_upload -> PUT /upload/<token>)
   api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll() on cloud websocket notifications (timer fallback)
@@ -135,13 +136,15 @@ library and moves the pin when a new release appears.
   })
   ```
 
-  That gives the Deployment, Service and Ingress (nginx and cert-manager by default). Every
-  setting and its default is in `deploy/jsonnet/config.libsonnet`. The library renders no
-  Namespace, no Secret and no RBAC: the deployment provides those.
+  That gives the Deployment and the Service (`<name>.<namespace>`, port 80). Every setting and
+  its default is in `deploy/jsonnet/config.libsonnet`. The library renders no Ingress, no
+  Namespace, no Secret and no RBAC: the deployment provides those, and decides whether and how
+  the Service is exposed (see Access control). `host` is optional: the public hostname, if the
+  Service is exposed under one, so `/mcp` accepts it.
 - **Credentials** come from the Secret named by `secretName` (default `remarkling-secrets`).
   Every key becomes an env var (`inkbridge/config.py`): `RM_DEVICE_TOKEN`, `ANTHROPIC_API_KEY`,
   and for Trilium `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE`. Non-secret settings go in the
-  library's `env`. `MCP_ALLOWED_HOSTS` defaults to the hostname plus the Service's in-cluster names.
+  library's `env`. `MCP_ALLOWED_HOSTS` defaults to `host` (if set) plus the Service's in-cluster names.
   Env is read only at start, so restart the Deployment after a credential changes.
 - **Postgres.** By default `DATABASE_URL` comes from the Secret `postgres-app`, key `uri`: what
   CloudNativePG generates for a Cluster named `postgres`. Point `database` at another Secret, or
@@ -153,8 +156,7 @@ library and moves the pin when a new release appears.
 
 One Deployment (`Recreate`), two containers (`server`, `poller`) sharing the data volume. Polls are
 serialised by an asyncio lock in-process and a file lock on the volume across containers. Rendered
-files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store. The public hostname
-needs a DNS record pointing at the cluster's ingress.
+files are pruned after `RETENTION_DAYS` (30); feedback JSON stays in the store.
 
 Document state (doc IDs, reMarkable UUIDs, status, Trilium links, feedback JSON) lives in the
 database `DATABASE_URL` names; its tables are created on start:
@@ -183,23 +185,39 @@ step (and update `Doc`/`_COLUMNS`); never edit one that has shipped.
 ## Access control
 
 The app does no authentication: whoever can reach it can use every route. Access is the
-infrastructure's job, so it can differ per realm and per path into the cluster (external through
-the Ingress, internal through the Service):
+infrastructure's job, outside this repo, so it can differ per realm and per path into the cluster
+(external through whatever exposes the Service, internal through the Service itself):
 
 | Realm   | Paths                                                     | Typical clients                     |
 | ------- | --------------------------------------------------------- | ----------------------------------- |
 | API     | `/api/`, `/push`, `/poll` (and `/docs`, `/openapi.json`)  | web UI, iPhone Shortcuts, REST      |
 | MCP     | `/mcp`                                                    | claude.ai connector, in-cluster agents |
+| upload  | `/upload/<token>`                                         | agents' shells (`curl -T`), via `create_upload` |
 | public  | `/healthz`, `/`, `/ui/`                                   | probes; the UI's static files (no data) |
 
-Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations).
+Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations),
+except the upload realm: its URLs carry their own credential, a random token that expires after
+`UPLOAD_TTL_S` (15 min) and works for one upload. The store keeps the grant behind it (the
+`uploads` table, with the token's SHA-256 only and the doc each upload pushed) so a URL stays
+single-use across restarts and containers. So
+whatever exposes the app must let `/upload/` through without the API realm's auth (agents' shells
+have no browser session): with ingress-nginx, a separate Ingress for the `/upload/` prefix
+without the auth annotations; with oauth2-proxy, `--skip-auth-route=^/upload/`. Its body size
+limit should allow `UPLOAD_MAX_MB` (50 MB).
+
+`create_upload` builds its URL from the request that reached `/mcp`: `X-Forwarded-Proto`,
+`X-Forwarded-Host` and `X-Forwarded-Prefix` if the proxy sets them (ingress-nginx does), else the
+`Host` header. An agent connected through the public host gets a public URL, one connected
+through the Service a Service URL, so it needs no configuration in or out of the cluster.
+`PUBLIC_URL` (the library's optional `publicUrl`) overrides it, for a proxy that rewrites the host
+without saying so.
 Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
 Without either, the app is open to the internet or to every pod in the cluster.
 
 ## iPhone Shortcuts (M6)
 
 - **Pull reMarkable**: Get Contents of URL, POST `https://<host>/poll`, header
-  whatever credentials the Ingress asks for on `/poll` → Get Dictionary Value `count`, `titles` → if count > 0, Show
+  whatever credentials your proxy asks for on `/poll` → Get Dictionary Value `count`, `titles` → if count > 0, Show
   Notification "Pulled N: titles" (optionally open `trilium_url`), else "Nothing in Outbox".
 - **Send to reMarkable**: Show in Share Sheet for URLs and PDFs; POST `https://<host>/push` as a form
   with `url` or `file` (and optional `title`), same credentials.
@@ -289,10 +307,30 @@ Approximations to check against the tablet (M0):
 
 ## Claude connector (M7)
 
-Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials the
-Ingress asks for on `/mcp` (see Access control).
-To push an artifact, Claude reads it with its own artifact tools and calls
-`push_document(html=...)`. The server can't fetch private artifacts itself.
+Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials your
+proxy asks for on `/mcp` (see Access control).
+The tablet works best with one tall scrolling page, which the server renders from markdown or
+HTML; a PDF keeps its own pages. So the server instructions tell Claude to send the source, never a
+PDF made from it: text it wrote as markdown, an artifact as its HTML (read with its own artifact
+tools; the server can't fetch private artifacts), a Claude Docs doc as its `markdown` export. A
+PDF goes only when a PDF is all there is. (A Claude Docs doc read as an artifact is a viewer that
+renders the doc in the browser; its `html` export is a bare fragment without CSS, which renders
+with the browser's defaults: tables without borders. The `markdown` export gets the server's
+stylesheet.)
+
+Anything big goes around the model instead of through it: a `push_document` argument passes
+through Claude's output, which fails long before a large document is done. An agent with a shell
+calls `create_upload(title, kind)` instead and runs the command it returns:
+
+```sh
+curl -sS --fail-with-body -T spec.md 'https://<host>/upload/<token>'   # create_upload(..., kind="markdown")
+# {"doc_id": "rm-abc123", "title": "Spec", "tablet_path": ["/Inbox/Spec · rm-abc123"], "parts": [...]}
+```
+
+`kind` says what is sent: `pdf` (the default), `html` or `markdown`; a body that doesn't match
+(no `%PDF-` header, or not UTF-8 text) is refused with 415. The URL is good
+for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
+with it.
 
 The round trip needs no folder moves: Claude keeps the doc ID from `push_document`, the user
 annotates the doc wherever it is, and when they say so Claude calls `pull_document(doc_id)`, which

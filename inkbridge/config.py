@@ -38,6 +38,12 @@ class Settings:
     trilium_parent_note: str = field(default_factory=lambda: _env("TRILIUM_PARENT_NOTE"))
 
     # Service
+    # The base URL create_upload's links start with. Empty: the one the MCP request came in on
+    # (X-Forwarded-Proto/-Host/-Prefix, else Host), which the caller can evidently reach.
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL").rstrip("/"))
+    # Lifetime of an upload URL, and the largest upload it takes (the proxy in front has its own limit).
+    upload_ttl_s: int = field(default_factory=lambda: int(_env("UPLOAD_TTL_S", "900")))
+    upload_max_mb: int = field(default_factory=lambda: int(_env("UPLOAD_MAX_MB", "50")))
     # Host names /mcp answers to (DNS rebinding protection), comma-separated. Empty: any host.
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
