@@ -15,14 +15,11 @@ def _env(name: str, default: str = "") -> str:
 @dataclass(frozen=True)
 class Settings:
     # reMarkable
-    rm_transport: str = field(default_factory=lambda: _env("RM_TRANSPORT", "cloud"))
     rm_device_token: str = field(default_factory=lambda: _env("RM_DEVICE_TOKEN"))
     rm_auth_host: str = field(
         default_factory=lambda: _env("RM_AUTH_HOST", "https://webapp-prod.cloud.remarkable.engineering")
     )
     rm_sync_host: str = field(default_factory=lambda: _env("RM_SYNC_HOST", "https://internal.cloud.remarkable.com"))
-    rm_ssh_host: str = field(default_factory=lambda: _env("RM_SSH_HOST", "10.11.99.1"))
-    rm_ssh_key: str = field(default_factory=lambda: _env("RM_SSH_KEY"))
     # Width of a page in .rm coordinate units; strokes are mapped onto the PDF width with it.
     # 1404 on reMarkable 2; calibrate on the Paper Pro during M0.
     rm_page_width_units: float = field(default_factory=lambda: float(_env("RM_PAGE_WIDTH_UNITS", "1404")))
@@ -41,20 +38,14 @@ class Settings:
     trilium_parent_note: str = field(default_factory=lambda: _env("TRILIUM_PARENT_NOTE"))
 
     # Service
-    api_token: str = field(default_factory=lambda: _env("API_TOKEN"))
-    mcp_token: str = field(default_factory=lambda: _env("MCP_TOKEN"))
-    # Header an auth proxy in front of the app (e.g. oauth2-proxy: X-Auth-Request-Email) sets on
-    # requests it has authenticated. A non-empty value admits /api/ requests without API_TOKEN, so
-    # the web UI rides on the proxy's session. The proxy must overwrite it on every /api/ request.
-    # Empty: /api/ needs the bearer token.
-    api_auth_header: str = field(default_factory=lambda: _env("API_AUTH_HEADER").lower())
+    # Host names /mcp answers to (DNS rebinding protection), comma-separated. Empty: any host.
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
     )
     # The poller wakes on the cloud's notifications websocket (one message per sync). Empty derives
     # wss://<sync host>/notifications/ws/json/1; "off" disables it and the poller just polls.
     rm_notifications_url: str = field(default_factory=lambda: _env("RM_NOTIFICATIONS_URL"))
-    # Poll interval while there is no websocket (SSH transport, "off", or disconnected). An idle poll
+    # Poll interval while there is no websocket ("off", or disconnected). An idle poll
     # is one GET of the root pointer (listings and index blobs are cached), so poll often.
     poll_interval_s: int = field(default_factory=lambda: int(_env("POLL_INTERVAL_S", "60")))
     # Safety-net poll while the websocket is up, in case a notification is lost.

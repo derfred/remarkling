@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .store import Store
-from .transport.cloud import CACHE_PREFIX, Index
+from .cloud import CACHE_PREFIX, Index
 
 KINDS = ("root", "index", "metadata", "content", "other")
 

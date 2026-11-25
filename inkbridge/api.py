@@ -1,38 +1,38 @@
-"""HTTP entry point: FastAPI routes for iPhone Shortcuts plus the MCP endpoint at /mcp."""
+"""HTTP entry point: FastAPI routes for iPhone Shortcuts plus the MCP endpoint at /mcp.
+
+The app does no authentication: whoever can reach it can use it. Access control belongs to the
+infrastructure in front of it (ingress auth, NetworkPolicy, a mesh), split by path:
+  /mcp                       MCP realm (claude.ai connector)
+  /api/, /push, /poll         API realm (web UI, Shortcuts, REST)
+  /docs, /redoc, /openapi.json the API's schema; no data
+  /healthz, /, /ui/           no data; the UI's calls go to /api/
+"""
 
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import mimetypes
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePath
-from urllib.parse import parse_qs, quote
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from mcp.server.transport_security import TransportSecuritySettings
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.staticfiles import StaticFiles
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_settings
 from .core.explorer import KINDS, CacheSnapshot
 from .core.pipeline import get_bridge
 from .core.renderer import PageNotFound, Renderer
-from .core.transport.base import RemoteDoc
+from .core.cloud import RemoteDoc
 from .mcp_server import mcp
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
-# The cache explorer UI: a Svelte app in web/, built into here by `npm run build` (not in git).
 UI_DIR = Path(__file__).parent / "web"
-
-
-def _is_public(path: str) -> bool:
-    """Served without a token. The UI's files hold no data; its /api/ calls carry the proxy's session."""
-    return path in ("/healthz", "/", "/ui") or path.startswith("/ui/")
 
 
 class UIFiles(StaticFiles):
@@ -43,39 +43,6 @@ class UIFiles(StaticFiles):
         immutable = PurePath(full_path).parent.name == "assets"
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable" if immutable else "no-cache"
         return response
-
-
-class TokenAuth:
-    """Bearer-token auth per route group. /mcp also accepts ?token= for connectors that cannot set headers.
-
-    /api/ also admits requests an auth proxy vouched for through API_AUTH_HEADER (the web UI's session).
-    """
-
-    def __init__(self, app: ASGIApp):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or _is_public(scope["path"]):
-            return await self.app(scope, receive, send)
-        settings = get_settings()
-        is_mcp = scope["path"].startswith("/mcp")
-        expected = settings.mcp_token if is_mcp else settings.api_token
-        headers = dict(scope.get("headers") or [])
-        if (settings.api_auth_header and (scope["path"] + "/").startswith("/api/")
-                and headers.get(settings.api_auth_header.encode(), b"").strip()):
-            return await self.app(scope, receive, send)
-        auth = headers.get(b"authorization", b"").decode()
-        given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-        if not given and is_mcp:
-            given = parse_qs(scope.get("query_string", b"").decode()).get("token", [""])[0]
-        if not expected:
-            response = JSONResponse({"detail": "token not configured"}, status_code=503)
-        elif not (given and hmac.compare_digest(given, expected)):
-            response = JSONResponse({"detail": "unauthorized"}, status_code=401,
-                                    headers={"WWW-Authenticate": "Bearer"})
-        else:
-            return await self.app(scope, receive, send)
-        await response(scope, receive, send)
 
 
 # Types browsers know but mimetypes may not; everything else is application/octet-stream.
@@ -155,7 +122,7 @@ async def lifespan(app: FastAPI):
     await get_bridge().aclose()
 
 
-def create_app() -> ASGIApp:
+def create_app() -> FastAPI:
     mcp_app = _mcp_app()
     app = FastAPI(title="Ink Bridge", lifespan=lifespan)
 
@@ -210,10 +177,7 @@ def create_app() -> ASGIApp:
 
     @app.post("/api/cache/sync")
     async def cache_sync():
-        sync = getattr(get_bridge().transport, "sync", None)
-        if sync is None:
-            raise HTTPException(501, "only the cloud transport keeps a cache")
-        return await sync()
+        return await get_bridge().transport.sync()
 
     @app.get("/api/cache/library")
     def cache_library():
@@ -242,7 +206,7 @@ def create_app() -> ASGIApp:
             raise HTTPException(404, "no such cache entry")
         return detail
 
-    # --- downloads: a document's files, fetched from the tablet (cloud or SSH), not the cache -----
+    # --- downloads: a document's files, fetched from the cloud, not the cache -----------------
 
     async def visible_name(uuid: str) -> str:
         node = snapshot().nodes.get(uuid)
@@ -317,7 +281,7 @@ def create_app() -> ASGIApp:
                                 status_code=503)
 
     app.mount("/", mcp_app)
-    return TokenAuth(app)
+    return app
 
 
 app = create_app()

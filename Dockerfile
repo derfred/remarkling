@@ -40,8 +40,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------- runtime ----------
 FROM mcr.microsoft.com/playwright/python:v${PLAYWRIGHT_VERSION}-noble
 
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client && rm -rf /var/lib/apt/lists/*
-
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 DATA_DIR=/data PROMPTS_DIR=/app/prompts \
     PATH=/app/.venv/bin:$PATH

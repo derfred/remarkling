@@ -24,7 +24,7 @@ import pymupdf
 from . import pagetext, templates
 from .pens import draw_stroke
 from .scene import RM_HEIGHT, RM_WIDTH, PageInk, parse_page
-from .transport.base import RmDoc
+from .rmdoc import RmDoc
 
 log = logging.getLogger(__name__)
 

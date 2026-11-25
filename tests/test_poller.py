@@ -10,6 +10,8 @@ from inkbridge import poller
 class NotifyingTransport:
     """Each connection replays messages put on `queue` until a None closes it; `fail` refuses one."""
 
+    notifications_enabled = True
+
     def __init__(self):
         self.queue: asyncio.Queue = asyncio.Queue()
         self.connects = 0
@@ -98,7 +100,7 @@ async def test_reconnects_and_catches_up_after_drop():
 
 
 async def test_falls_back_to_timer_without_notifications():
-    bridge = CountingBridge(transport=object())  # e.g. SSH: no notifications()
+    bridge = CountingBridge(transport=SimpleNamespace(notifications_enabled=False))  # RM_NOTIFICATIONS_URL=off
     task = asyncio.create_task(poller.run(bridge, settings(interval=0.05), debounce_s=0))
     try:
         await wait_until(lambda: bridge.polls >= 3)
@@ -115,7 +117,3 @@ async def test_safety_poll_while_connected():
     finally:
         await stop(task)
 
-
-def test_disabled_notifications_are_not_supported():
-    assert not poller.Listener.supported(SimpleNamespace(notifications=None, notifications_enabled=False))
-    assert poller.Listener.supported(NotifyingTransport())

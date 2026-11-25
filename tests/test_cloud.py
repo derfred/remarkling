@@ -5,17 +5,17 @@ import httpx
 import pytest
 from websockets.asyncio.server import serve
 
-from inkbridge.core.transport.cloud import (
+from inkbridge.core.cloud import (
     CloudTransport,
     Entry,
     Index,
     crc32c,
     default_notifications_url,
     parse_notification,
+    RemoteDoc,
     sha256,
 )
 from inkbridge.core.store import SQLiteStore
-from inkbridge.core.transport.base import RemoteDoc
 from rmfixtures import sample_pdf
 
 

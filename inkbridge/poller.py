@@ -2,7 +2,7 @@
 
 The cloud's notifications websocket wakes the loop: every sync (the tablet's, or a root swap by any
 other client) sends one message. A slow timer (POLL_FALLBACK_S) covers lost messages. Without a
-websocket (SSH transport, RM_NOTIFICATIONS_URL=off, or while reconnecting) it polls every
+websocket (RM_NOTIFICATIONS_URL=off, or while reconnecting) it polls every
 POLL_INTERVAL_S instead. Old files are pruned once a day.
 """
 
@@ -33,10 +33,6 @@ class Listener:
         self.transport = transport
         self.wake = wake
         self.connected = False
-
-    @staticmethod
-    def supported(transport) -> bool:
-        return hasattr(transport, "notifications") and getattr(transport, "notifications_enabled", True)
 
     async def run(self) -> None:
         backoff = MIN_BACKOFF_S
@@ -69,7 +65,7 @@ async def run(bridge: InkBridge, settings: Settings, debounce_s: float = DEBOUNC
     wake = asyncio.Event()
     wake.set()  # poll once on start
     transport = bridge.transport
-    listener = Listener(transport, wake) if Listener.supported(transport) else None
+    listener = Listener(transport, wake) if transport.notifications_enabled else None
     task = asyncio.create_task(listener.run()) if listener else None
     if listener:
         log.info("watching /%s via notifications, safety poll every %ss", settings.outbox_folder, settings.poll_fallback_s)

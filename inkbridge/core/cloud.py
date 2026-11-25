@@ -16,17 +16,94 @@ import hashlib
 import json
 import logging
 import struct
+import time
+import uuid as uuid_lib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any, Iterable, Protocol, Sequence
 
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 
-from .base import Cache, RemoteDoc, RmDoc, check_file_name, document_metadata, new_uuid, now_ms, pdf_content
+from .rmdoc import RmDoc
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class RemoteDoc:
+    uuid: str
+    name: str
+    parent: str  # folder UUID, "" for root
+    # The document index's blob hash: changes whenever the document changes.
+    version: str = ""
+    last_modified: float = 0.0
+
+
+class Cache(Protocol):
+    """Shared, persistent cache for immutable values (implemented by `Store`). Values are JSON."""
+
+    def cache_get_many(self, keys: Sequence[str]) -> dict[str, Any]: ...
+
+    def cache_put_many(self, items: dict[str, Any]) -> None: ...
+
+    def cache_retain(self, prefix: str, keep: Iterable[str]) -> int: ...
+
+
+def check_file_name(doc_uuid: str, name: str) -> None:
+    """A document's files are "<uuid>.<ext>" or live under "<uuid>/"; anything else is refused."""
+    if not (name.startswith(doc_uuid + ".") or name.startswith(doc_uuid + "/")) or ".." in name.split("/"):
+        raise FileNotFoundError(f"{name} is not a file of document {doc_uuid}")
+
+
+def new_uuid() -> str:
+    return str(uuid_lib.uuid4())
+
+
+def now_ms() -> str:
+    return str(int(time.time() * 1000))
+
+
+def document_metadata(name: str, parent: str, kind: str = "DocumentType") -> dict:
+    return {
+        "createdTime": now_ms(),
+        "deleted": False,
+        "lastModified": now_ms(),
+        "lastOpened": "0",
+        "lastOpenedPage": 0,
+        "metadatamodified": False,
+        "modified": False,
+        "parent": parent,
+        "pinned": False,
+        "synced": True,
+        "type": kind,
+        "version": 0,
+        "visibleName": name,
+    }
+
+
+def pdf_content(page_count: int) -> dict:
+    # fitToWidth so tall single-page PDFs open as one scrolling column.
+    return {
+        "coverPageNumber": 0,
+        "documentMetadata": {},
+        "extraMetadata": {},
+        "fileType": "pdf",
+        "fontName": "",
+        "formatVersion": 1,
+        "lineHeight": -1,
+        "margins": 125,
+        "orientation": "portrait",
+        "pageCount": page_count,
+        "sizeInBytes": "0",
+        "tags": [],
+        "textAlignment": "justify",
+        "textScale": 1,
+        "zoomMode": "fitToWidth",
+    }
+
 
 DOC_TYPE = "80000000"
 FILE_TYPE = "0"

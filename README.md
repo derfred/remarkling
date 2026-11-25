@@ -24,7 +24,8 @@ most every 6 hours; a new version (more ink) is retried at once.
 inkbridge/
   core/
     render.py      # HTML/MD/URL -> tall PDF (Playwright), split at h2 over 5,000 mm, stamp /InkBridgeId
-    transport/     # base.py protocol; cloud.py (sync15 blob API); ssh.py (developer mode)
+    cloud.py       # reMarkable cloud client (sync15 blob API, notifications websocket)
+    rmdoc.py       # a document's files (.rmdoc contents): metadata, content, PDF, page .rm
     scene.py       # .rm (v6) page -> strokes with per-point pen data, highlights, typed text (rmscene)
     renderer.py    # any document (notebooks too) -> PDF or per-page PNG, tablet page order
     pens.py        # per-pen stroke width and opacity from pressure, speed, tilt
@@ -37,7 +38,7 @@ inkbridge/
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), poll() = poll_outbox() (pull) + interpret_pending()
   mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
-  api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp, bearer-token auth
+  api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll() on cloud websocket notifications (timer fallback)
   cli.py           # inkbridge push|poll|inbox|register|serve|poller
@@ -70,8 +71,8 @@ The poller does not poll on a timer when it can avoid it. It holds the cloud's n
 websocket open (`wss://<RM_SYNC_HOST>/notifications/ws/json/1`, override with `RM_NOTIFICATIONS_URL`).
 Every sync, including the tablet's, sends a message there, and each message triggers a
 `poll()` after a 2 s debounce. A reconnect also triggers one, to catch up on anything missed. While the
-socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket (SSH transport,
-`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
+socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket
+(`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
@@ -85,7 +86,7 @@ These are assumptions the code makes that only the real tablet and cloud can con
   (1404 on reMarkable 2). Annotate a known spot on the Paper Pro and adjust if strokes land off.
 - **Cloud protocol.** `cloud.py` follows the rmapi sync15 flow (`/sync/v4/root`, `/sync/v3/files`,
   generation-checked root swap). Hosts are `RM_AUTH_HOST` / `RM_SYNC_HOST`. If the account uses a
-  different schema or host, fix it there; `RM_TRANSPORT=ssh` is the fallback.
+  different schema or host, fix it there.
 - **Notifications websocket.** The endpoint (`/notifications/ws/json/1` on the sync host, bearer
   user token) and message shape (`{"message": {"attributes": {"event": "SyncComplete", ...}}}`)
   come from rmapi/rmfakecloud. Annotate a page and move it to Outbox, then check that the poller logs
@@ -124,8 +125,8 @@ library and moves the pin when a new release appears.
   Namespace, no Secret and no RBAC: the deployment provides those.
 - **Credentials** come from the Secret named by `secretName` (default `remarkling-secrets`).
   Every key becomes an env var (`inkbridge/config.py`): `RM_DEVICE_TOKEN`, `ANTHROPIC_API_KEY`,
-  `API_TOKEN`, `MCP_TOKEN`, and for Trilium `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE`.
-  Non-secret settings go in the library's `env`. `MCP_ALLOWED_HOSTS` defaults to the hostname.
+  and for Trilium `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE`. Non-secret settings go in the
+  library's `env`. `MCP_ALLOWED_HOSTS` defaults to the hostname plus the Service's in-cluster names.
   Env is read only at start, so restart the Deployment after a credential changes.
 - **Postgres.** By default `DATABASE_URL` comes from the Secret `postgres-app`, key `uri`: what
   CloudNativePG generates for a Cluster named `postgres`. Point `database` at another Secret, or
@@ -157,27 +158,45 @@ holds the rendered and annotated files and the cross-container poll lock; a SQLi
 it too, so both containers see the same one, and then the volume has to be persistent. Switching
 does not migrate existing rows.
 
+Schema changes are migrations: `SCHEMA` in `store.py` is the v0.2.1 baseline, and `MIGRATIONS` is an
+append-only list of SQL steps applied in order on start, each once and in its own transaction, with
+the count applied kept in `schema_version`. Both backends run the same steps; Postgres under an
+advisory lock, SQLite under `BEGIN IMMEDIATE`, so a server and poller starting together don't race.
+A database migrated by a newer release is refused rather than used. To change the schema, append a
+step (and update `Doc`/`_COLUMNS`); never edit one that has shipped.
+
+## Access control
+
+The app does no authentication: whoever can reach it can use every route. Access is the
+infrastructure's job, so it can differ per realm and per path into the cluster (external through
+the Ingress, internal through the Service):
+
+| Realm   | Paths                                                     | Typical clients                     |
+| ------- | --------------------------------------------------------- | ----------------------------------- |
+| API     | `/api/`, `/push`, `/poll` (and `/docs`, `/openapi.json`)  | web UI, iPhone Shortcuts, REST      |
+| MCP     | `/mcp`                                                    | claude.ai connector, in-cluster agents |
+| public  | `/healthz`, `/`, `/ui/`                                   | probes; the UI's static files (no data) |
+
+Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations).
+Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
+Without either, the app is open to the internet or to every pod in the cluster.
+
 ## iPhone Shortcuts (M6)
 
 - **Pull reMarkable**: Get Contents of URL, POST `https://<host>/poll`, header
-  `Authorization: Bearer <API_TOKEN>` → Get Dictionary Value `count`, `titles` → if count > 0, Show
+  whatever credentials the Ingress asks for on `/poll` → Get Dictionary Value `count`, `titles` → if count > 0, Show
   Notification "Pulled N: titles" (optionally open `trilium_url`), else "Nothing in Outbox".
 - **Send to reMarkable**: Show in Share Sheet for URLs and PDFs; POST `https://<host>/push` as a form
-  with `url` or `file` (and optional `title`), same header.
+  with `url` or `file` (and optional `title`), same credentials.
 
 ## Cache explorer
 
 `https://<host>/ui/` is a mobile-first web UI for the cloud blob cache: browse the library as the
 last cloud listing saw it (folders, documents, pages, which files are cached, Ink Bridge status),
 the raw cache entries by kind (root, index, metadata, content), and cache stats. The page itself
-is public and holds no data. It has no login of its own: it relies on the OAuth proxy in front of the
-app (e.g. oauth2-proxy via the Ingress `annotations`) and sends its session cookie with every API
-call. Set `API_AUTH_HEADER` to the header the proxy sets on authenticated requests (oauth2-proxy:
-`X-Auth-Request-Email`, passed on with `nginx.ingress.kubernetes.io/auth-response-headers`); a
-non-empty value then admits `/api/` requests without `API_TOKEN`. The proxy must cover `/api/` and
-overwrite that header there, or anyone could send it. When the session lapses the UI reloads to
-sign in again. It is
-read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
+holds no data. It has no login of its own: it relies on the auth proxy in front of the app (see
+Access control) and sends its session cookie with every API call. When the session lapses (a 401
+or a redirect to the proxy's sign-in) the UI reloads to sign in again. It is read-only and only as fresh as the last poll or push, until you tap the cloud button: that syncs
 the cache with the current root, fetching any index, `.metadata` or `.content` blob it lacks (a poll
 skips `.content`, which holds page counts and file types). Blobs already cached cost no request.
 
@@ -185,11 +204,9 @@ The UI is a Svelte 5 app styled with Tailwind CSS 4, in `web/`. `npm run build` 
 `inkbridge/web/`, which the server serves at `/ui/` (fingerprinted `assets/` cached for good,
 `index.html` never); without a build, `/ui/` answers 503. The Docker image builds it in a Node stage.
 For UI work, run `inkbridge serve` on :8000 and `npm run dev` in `web/`: Vite serves the app on
-http://localhost:5173/ui/ with hot reload and proxies `/api` to the server, adding
-`X-Auth-Request-Email` in place of the OAuth proxy (start the server with
-`API_AUTH_HEADER=X-Auth-Request-Email`).
+http://localhost:5173/ui/ with hot reload and proxies `/api` to the server.
 
-The same data is a REST API with `Authorization: Bearer <API_TOKEN>` (or the proxy's session):
+The same data is a REST API:
 
 | Route                           | Returns                                                         |
 | ------------------------------- | --------------------------------------------------------------- |
@@ -198,15 +215,14 @@ The same data is a REST API with `Authorization: Bearer <API_TOKEN>` (or the pro
 | `/api/cache/library/{uuid}`     | one node: breadcrumbs, metadata, content, its files and whether each is cached |
 | `/api/cache/blobs`              | cache entries; `kind`, `q` (key, file or document name), `limit`, `offset` |
 | `/api/cache/blobs/{key}`        | one entry decoded: parsed index, JSON or text                   |
-| `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched (501 on SSH) |
+| `POST /api/cache/sync`          | sync as above; returns root hash, entries, documents, blobs fetched |
 
 ### Downloads
 
 A document's page in the UI downloads its original (PDF or EPUB), any single file from its index,
 or the whole document as an `.rmdoc` (a zip with the original, metadata and every page's strokes).
 Unlike the rest of the explorer, downloads don't come from the cache. The server fetches them from
-the tablet on request, over the cloud or SSH transport, so they work for files marked "not cached".
-Downloaded files are named after the document, e.g. `Spec.pdf` or `Spec <page>.rm`.
+the cloud on request, so they work for files marked "not cached". Downloaded files are named after the document, e.g. `Spec.pdf` or `Spec <page>.rm`.
 
 | Route                                | Returns                                                    |
 | ------------------------------------ | ---------------------------------------------------------- |
@@ -258,7 +274,7 @@ Approximations to check against the tablet (M0):
 
 ## Claude connector (M7)
 
-Add `https://<host>/mcp` as a custom connector in claude.ai. The endpoint takes `Authorization:
-Bearer <MCP_TOKEN>`, or `?token=<MCP_TOKEN>` in the URL for clients that cannot set headers.
+Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials the
+Ingress asks for on `/mcp` (see Access control).
 To push an artifact, Claude reads it with its own artifact tools and calls
 `push_document(html=...)`. The server can't fetch private artifacts itself.

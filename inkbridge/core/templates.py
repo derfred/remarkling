@@ -13,7 +13,7 @@ import re
 
 import pymupdf
 
-from .transport.base import RmDoc
+from .rmdoc import RmDoc
 
 # Spacing in .rm units (226 dpi): about 6, 8 and 10 mm.
 SPACING = {"small": 53, "medium": 71, "large": 89}
