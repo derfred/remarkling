@@ -5,7 +5,10 @@ by hand, then pull the markup back as structured feedback into Trilium and Claud
 
 ```
 push:  chat / Shortcut / CLI ─▶ render tall PDF + rm-xxxxxx ID ─▶ /Inbox on the tablet
-pull:      /Outbox ─▶ download .rmdoc ─▶ strokes over original ─▶ strips + highlights ─▶ /Archive
+track: every poll ─▶ .rm hashes of each pushed doc, in any folder ─▶ has_new_ink, changed pages
+pull:  pull_document(id), doc stays put ─┐
+       /Outbox (no agent) ───────────────┴▶ download .rmdoc ─▶ strokes over original ─▶ strips + highlights
+                                            (Outbox docs then move to /Archive)
 interpret: pulled ink ─▶ Claude vision per strip ─▶ marks, notes, summary (optional)
                                                    ├─▶ Trilium note (+ PDFs, labels)
                                                    └─▶ MCP get_annotations (strips as images, always)
@@ -17,6 +20,15 @@ pulled doc's interpretation is `off` and an agent reads the strip images itself.
 either stage is stored on the doc (stage, error, attempt count) and shown by `poll_now`,
 `list_returned` and `get_annotations`. The same version is retried after 1, 2, 4 ... minutes, at
 most every 6 hours; a new version (more ink) is retried at once.
+
+A pushed document is tracked by its reMarkable UUID wherever the user files it. Its ink is the set
+of `.rm` file hashes in its cloud index: opening or moving a doc gives it a new version but leaves
+those alone, so they tell new strokes from everything else, and checking them downloads nothing
+(the indexes are cached). `poll()` records them for every tracked doc and reports the docs whose
+ink changed; `document_status` and `list_documents` check on demand and say which pages have ink
+not yet pulled. `pull_document` pulls only when the ink differs from the last pull and leaves the
+doc where it is, then interprets in the background (its own lock: a pull never waits for a model
+call). A doc deleted or trashed on the tablet stops being tracked; `remove_document` trashes one.
 
 ## Layout
 
@@ -36,13 +48,14 @@ inkbridge/
     trilium.py     # ETAPI note per doc; re-pull updates in place
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
-    pipeline.py    # push_document(), poll() = poll_outbox() (pull) + interpret_pending()
-  mcp_server.py    # push_document, create_upload, poll_now, list_returned, get_annotations, list_inbox
+    pipeline.py    # push_document(), pull_document(), check_ink(); poll() = poll_outbox() + check_ink() + interpret_pending()
+  mcp_server.py    # push_document, create_upload, pull_document, document_status, list_documents,
+                   # remove_document, get_annotations, poll_now, list_returned, list_inbox
   uploads.py       # signed one-time upload URLs (create_upload -> PUT /upload/<token>)
   api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll() on cloud websocket notifications (timer fallback)
-  cli.py           # inkbridge push|poll|inbox|register|serve|poller
+  cli.py           # inkbridge push|pull|status|poll|inbox|register|serve|poller
 web/               # cache explorer UI: Svelte 5 + Tailwind CSS 4, built by Vite into inkbridge/web
 prompts/interpret.md
 deploy/jsonnet/    # Kubernetes objects as a jsonnet library; VERSION = the release version
@@ -56,7 +69,9 @@ uv run playwright install chromium
 uv run inkbridge register <code> # code from my.remarkable.com/device/desktop/connect
 cp .env.example .env            # fill in RM_DEVICE_TOKEN, ANTHROPIC_API_KEY
 uv run inkbridge push spec.html  # M1
-uv run inkbridge poll            # M2/M3
+uv run inkbridge status          # tracked docs and whether they have new ink
+uv run inkbridge pull rm-xxxxxx  # fetch a doc's annotations, wherever it is on the tablet
+uv run inkbridge poll            # M2/M3: the Outbox
 uv run pytest
 (cd web && npm ci && npm run build)  # the cache explorer UI at /ui/; the tests don't need it
 ```
@@ -298,3 +313,9 @@ for one upload within 15 minutes, needs no other credential, and a failed upload
 with it. Guidance in the server instructions: text written in the conversation goes as markdown
 (one tall page); files and artifacts go as PDF via `create_upload`, a Claude Docs doc as its PDF
 export.
+
+The round trip needs no folder moves: Claude keeps the doc ID from `push_document`, the user
+annotates the doc wherever it is, and when they say so Claude calls `pull_document(doc_id)`, which
+returns the annotated strips as images (and the marks, once interpreted). `document_status` and
+`list_documents(changed_only=true)` show which docs have ink not yet pulled. An MCP server cannot
+start a turn, so new ink is shown when Claude asks; `poll_now` also lists it under `changed`.

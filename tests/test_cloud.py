@@ -306,3 +306,37 @@ async def test_download_file(cloud):
         await t.download_file("missing", "missing.pdf")
     with pytest.raises(FileNotFoundError):
         await t.download(RemoteDoc("missing", "", ""))
+
+
+async def test_inspect_reports_ink_location_and_trash(cloud):
+    fake, t = cloud
+    u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    [state] = (await t.inspect([u, "missing"])).values()
+    assert state.location == "/Inbox" and state.pages == {} and state.name == "Spec"
+
+    # Ink a page: add "<uuid>/<page>.rm" to the doc's index, as the tablet does.
+    root = Index.parse(fake.blobs[fake.root])
+    entry = root.get(u)
+    index = Index.parse(fake.blobs[entry.hash])
+    rm = b"strokes"
+    fake.blobs[sha256(rm)] = rm
+    index.put(Entry(sha256(rm), "0", f"{u}/page-1.rm", 0, len(rm)))
+    data = index.serialize(u)
+    h = index.hash(data)
+    fake.blobs[h] = data
+    root.put(Entry(h, entry.type, u, len(index.entries), 0))
+    data = root.serialize(".")
+    fake.root = sha256(data)
+    fake.blobs[fake.root] = data
+
+    state = (await t.inspect([u]))[u]
+    assert state.pages == {"page-1": sha256(rm)} and state.version == h
+    assert (await t.list_folder("Inbox"))[0].pages == state.pages
+
+    await t.move(state, "Outbox")
+    moved = (await t.inspect([u]))[u]
+    assert moved.location == "/Outbox" and moved.pages == state.pages and moved.version != state.version
+
+    await t.trash(u)
+    assert await t.inspect([u]) == {}
+    assert await t.list_folder("Outbox") == []

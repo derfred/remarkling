@@ -21,7 +21,8 @@ def _blocks(result):
 
 async def test_tools_listed():
     names = {t.name for t in await mcp.list_tools()}
-    assert names == {"push_document", "create_upload", "poll_now", "list_returned", "get_annotations", "list_inbox"}
+    assert names == {"push_document", "create_upload", "pull_document", "document_status", "list_documents",
+                     "remove_document", "poll_now", "list_returned", "get_annotations", "list_inbox"}
 
 
 async def test_round_trip_through_tools(bridge):
@@ -78,3 +79,26 @@ async def test_create_upload(bridge, monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_server, "get_settings", lambda: config.Settings(data_dir=tmp_path))
     none = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x"}))[0].text)
     assert "PUBLIC_URL" in none["error"]
+
+
+async def test_pull_document_tool_returns_strips(bridge):
+    import json
+
+    pushed = await bridge.push_document("Spec", pdf=sample_pdf())
+    bridge.transport.annotate(bridge.store.get(pushed.doc_id).rm_uuid, rm_page([line([(0, 300), (10, 310)])]),
+                              move_to=None)
+    status = json.loads(_blocks(await mcp.call_tool("document_status", {"doc_id": pushed.doc_id}))[0].text)
+    assert status["has_new_ink"] and status["location"] == "/Inbox"
+
+    blocks = _blocks(await mcp.call_tool("pull_document", {"doc_id": pushed.doc_id}))
+    assert json.loads(blocks[0].text)["pulled"][0]["new"] is True
+    assert json.loads(blocks[1].text)["status"] == "pulled"
+    assert any(getattr(b, "type", "") == "image" for b in blocks[2:])
+    await bridge.drain()
+
+    removed = json.loads(_blocks(await mcp.call_tool("remove_document", {"doc_id": pushed.doc_id}))[0].text)
+    assert removed == {"removed": [pushed.doc_id]}
+    gone = _blocks(await mcp.call_tool("pull_document", {"doc_id": pushed.doc_id}))
+    assert "not on the tablet" in gone[0].text and any(getattr(b, "type", "") == "image" for b in gone)
+    missing = _blocks(await mcp.call_tool("pull_document", {"doc_id": "rm-zzzzzz"}))
+    assert "No document rm-zzzzzz" in missing[0].text

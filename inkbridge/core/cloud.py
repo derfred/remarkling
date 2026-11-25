@@ -20,7 +20,7 @@ import time
 import uuid as uuid_lib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Protocol, Sequence
 
 import httpx
@@ -37,9 +37,12 @@ class RemoteDoc:
     uuid: str
     name: str
     parent: str  # folder UUID, "" for root
-    # The document index's blob hash: changes whenever the document changes.
+    # The document index's blob hash: changes whenever the document changes (opened, moved, inked).
     version: str = ""
     last_modified: float = 0.0
+    # Page ID -> blob hash of its .rm file: the ink. Changes only when strokes do, unlike `version`.
+    pages: dict[str, str] = field(default_factory=dict)
+    location: str = ""  # folder path on the tablet, "/" for the top level, e.g. "/Inbox"
 
 
 class Cache(Protocol):
@@ -172,6 +175,12 @@ class Index:
 
     def put(self, entry: Entry) -> None:
         self.entries = [e for e in self.entries if e.id != entry.id] + [entry]
+
+
+def ink_pages(doc_uuid: str, index: Index) -> dict[str, str]:
+    """Page ID -> hash of the page's strokes file ("<uuid>/<page>.rm") in a document index."""
+    prefix = doc_uuid + "/"
+    return {e.id[len(prefix):-3]: e.hash for e in index.entries if e.id.startswith(prefix) and e.id.endswith(".rm")}
 
 
 def sha256(data: bytes) -> str:
@@ -567,17 +576,32 @@ class CloudTransport:
         folder = await self._folder_uuid(name, docs)
         if folder is None:
             return []
-        return [
-            RemoteDoc(
-                uuid=e.id,
-                name=m.get("visibleName", ""),
-                parent=folder,
-                version=e.hash,
-                last_modified=int(m.get("lastModified", "0") or 0) / 1000,
-            )
-            for e, m in docs
-            if m.get("parent") == folder and m.get("type") == "DocumentType"
-        ]
+        return [await self._remote(e, m, f"/{name}") for e, m in docs
+                if m.get("parent") == folder and m.get("type") == "DocumentType"]
+
+    async def inspect(self, uuids: Iterable[str]) -> dict[str, RemoteDoc]:
+        """The current state of the given documents, wherever they are: version, ink, location.
+
+        Documents deleted or in the trash are missing from the result. Costs one request (the root)
+        while nothing changed, and only the changed indexes otherwise, as listing does.
+        """
+        wanted = set(uuids)
+        root_hash, _, root = await self.get_root()
+        docs = await self._all_docs(root_hash, root)
+        meta = {e.id: m for e, m in docs}
+        return {e.id: await self._remote(e, m, _location(m, meta)) for e, m in docs if e.id in wanted}
+
+    async def _remote(self, e: Entry, m: dict, location: str) -> RemoteDoc:
+        index, _ = await self._doc(e)  # in memory after a listing
+        return RemoteDoc(
+            uuid=e.id,
+            name=m.get("visibleName", ""),
+            parent=m.get("parent", ""),
+            version=e.hash,
+            last_modified=int(m.get("lastModified", "0") or 0) / 1000,
+            pages=ink_pages(e.id, index),
+            location=location,
+        )
 
     async def upload_pdf(self, pdf: bytes, visible_name: str, folder: str) -> str:
         import pymupdf
@@ -621,20 +645,35 @@ class CloudTransport:
         return await self.get_blob(file.hash, file.id)
 
     async def move(self, doc: RemoteDoc, folder: str) -> None:
-        folder_uuid = await self.ensure_folder(folder)
+        await self._set_parent(doc.uuid, await self.ensure_folder(folder))
 
+    async def trash(self, doc_uuid: str) -> None:
+        """Move a document to the tablet's trash, from where the user can restore it."""
+        await self._set_parent(doc_uuid, "trash")
+
+    async def _set_parent(self, doc_uuid: str, parent: str) -> None:
         async def mutate(root: Index):
-            entry = root.get(doc.uuid)
+            entry = root.get(doc_uuid)
             if entry is None:
-                raise CloudError(f"document {doc.uuid} not found")
+                raise CloudError(f"document {doc_uuid} not found")
             index, meta = await self._doc(entry)
-            meta = {**meta, "parent": folder_uuid, "lastModified": now_ms(), "metadatamodified": True}
-            meta_name = f"{doc.uuid}.metadata"
+            meta = {**meta, "parent": parent, "lastModified": now_ms(), "metadatamodified": True}
+            meta_name = f"{doc_uuid}.metadata"
             meta_bytes = json.dumps(meta).encode()
             index = Index(index.schema, list(index.entries))
             index.put(Entry(await self.put_blob(meta_bytes, meta_name), FILE_TYPE, meta_name, 0, len(meta_bytes)))
-            data = index.serialize(doc.uuid)
-            h = await self.put_blob(data, f"{doc.uuid}.docSchema", index.hash(data))
-            root.put(Entry(h, DOC_TYPE, doc.uuid, len(index.entries), sum(e.size for e in index.entries)))
+            data = index.serialize(doc_uuid)
+            h = await self.put_blob(data, f"{doc_uuid}.docSchema", index.hash(data))
+            root.put(Entry(h, DOC_TYPE, doc_uuid, len(index.entries), sum(e.size for e in index.entries)))
 
         await self._commit(mutate)
+
+
+def _location(meta: dict, by_uuid: dict[str, dict]) -> str:
+    """The folder path a document sits in, from its parents' visible names."""
+    names, parent, seen = [], meta.get("parent", ""), set()
+    while parent and parent not in seen and parent in by_uuid:
+        seen.add(parent)
+        names.append(by_uuid[parent].get("visibleName", parent))
+        parent = by_uuid[parent].get("parent", "")
+    return "/" + "/".join(reversed(names))

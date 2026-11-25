@@ -176,3 +176,17 @@ def test_sqlite_path(url, path):
 def test_sqlite_path_rejects(url):
     with pytest.raises(ValueError):
         open_store(Settings(database_url=url))
+
+
+def test_update_and_tracked(store):
+    store.upsert(Doc("rm-aaaaaa", "rm-aaaaaa", "A", "pdf", rm_uuid="u-a", pushed_at=1.0))
+    store.upsert(Doc("rm-bbbbbb", "rm-bbbbbb", "B", "pdf", rm_uuid="u-b", pushed_at=2.0))
+    store.upsert(Doc("rm-cccccc", "rm-cccccc", "C", "pdf", pushed_at=3.0))  # never uploaded
+    store.update("rm-aaaaaa", ink_seen={"p1": "h1"}, ink_changed_at=5.0, location="/Inbox")
+    a = store.get("rm-aaaaaa")
+    assert a.ink_seen == {"p1": "h1"} and a.ink_pulled is None and a.location == "/Inbox" and a.title == "A"
+    assert [d.doc_id for d in store.recent()] == ["rm-aaaaaa", "rm-bbbbbb"]
+    store.update("rm-bbbbbb", removed_at=6.0)
+    assert [d.doc_id for d in store.tracked()] == ["rm-aaaaaa"]
+    with pytest.raises(ValueError):
+        store.update("rm-aaaaaa", nope=1)
