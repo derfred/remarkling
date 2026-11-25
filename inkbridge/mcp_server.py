@@ -18,22 +18,26 @@ MAX_IMAGES = 10
 mcp = MCPServer(
     name="Ink Bridge",
     instructions=(
-        "Ink Bridge sends documents to the user's reMarkable tablet and returns their handwritten "
-        "markup as structured feedback. Text you write in the conversation: push_document(markdown=...); "
-        "markdown and HTML become one tall scrolling page, which suits annotation best. A file, an "
-        "artifact or anything over ~50 KB: if you have a shell, call create_upload and send the file "
-        "with the curl command it returns, so the bytes never pass through your context. Artifacts go "
-        "as PDF (a Claude Docs doc: its PDF export; an HTML artifact may also go as its HTML file, "
-        "with kind=\"html\"); "
-        "a PDF keeps its own pages. Without a shell, read a small HTML artifact with your artifact "
-        "tools and pass its full HTML (CSS and assets inlined) to push_document. Keep the doc ID it returns: "
-        "the document is tracked by it wherever the user files it, so they need not move it anywhere. "
-        "When the user says they annotated it, call pull_document with the doc ID: it returns the "
-        "annotated page strips as images, and the interpreted marks once interpretation is done; if "
-        "interpretation is pending, off or failed, read the marks from the images yourself. "
-        "document_status and list_documents tell whether a doc has ink not yet pulled, without pulling. "
-        "Documents the user moved to /Outbox are pulled by poll_now (that is the flow without a "
-        "conversation). If a pull fails, tell the user the error rather than retrying."
+        "Ink Bridge puts documents on the user's reMarkable tablet and brings back their handwritten "
+        "markup.\n\n"
+        "Layout: the tablet works best with one tall scrolling page, which the server renders from "
+        "markdown or HTML. A PDF is passed through with its own pages, so never make a PDF from content "
+        "that has a source: send the source and let the server render it. Send a PDF only when a PDF is "
+        "all there is (a paper, a scan, a file the user gave you).\n\n"
+        "Sending (each way returns a doc_id; keep it, every later call needs it):\n"
+        "- Text you wrote: push_document(markdown=...).\n"
+        "- An artifact: its HTML (CSS and assets inlined), or its markdown. A Claude Docs doc: export "
+        "the tab as html (or markdown), not pdf.\n"
+        "- A file on disk, or content over ~50 KB: with a shell, create_upload(title, kind) and run the "
+        "curl command it returns, with <file> replaced by the path; the doc_id is in curl's output. "
+        "Without a shell, or if the URL is unreachable from it, pass markdown or HTML to push_document.\n\n"
+        "Getting annotations back: when the user says they are done, pull_document(doc_id). It fetches "
+        "from the tablet, wherever the doc is, and returns the page strips as images, plus interpreted "
+        "marks once interpretation is done; otherwise read the marks from the images yourself. "
+        "get_annotations returns what was last pulled without contacting the tablet. document_status "
+        "and list_documents show whether a doc has new ink, without pulling.\n\n"
+        "poll_now, list_returned and list_inbox serve the Outbox flow, which needs no conversation; you "
+        "rarely need them. If a pull fails, tell the user the error rather than retrying it."
     ),
 )
 
@@ -70,12 +74,14 @@ async def push_document(
     url: str | None = None,
     ready_selector: str | None = None,
 ) -> dict:
-    """Render content to one tall scrolling PDF page and upload it to /Inbox on the tablet.
+    """Upload content to /Inbox on the tablet. Returns doc_id (keep it), tablet path and parts.
 
-    Pass exactly one of html, markdown, pdf_base64 or url (a public URL). Prefer markdown for text
-    you wrote. A PDF keeps its own pages. For files and anything large, use create_upload instead:
-    pdf_base64 puts every byte through your context. ready_selector waits for a CSS selector
-    before rendering (JS-drawn charts, Mermaid). Returns the doc ID and tablet path.
+    Pass exactly one of markdown, html, url (a public page) or pdf_base64. Markdown, HTML and URLs
+    are rendered to one tall scrolling page, the layout the tablet works best with; very long
+    content is split at h2 headings into several docs ("parts"), all under the one doc_id. A PDF
+    keeps its own pages, so pass one only when no source exists, and only a small one: every byte
+    goes through your context. Files and anything over ~50 KB go through create_upload.
+    ready_selector (HTML, url) waits for a CSS selector before rendering: JS-drawn charts, Mermaid.
     """
     result = await get_bridge().push_document(
         title,
@@ -114,13 +120,17 @@ def request_base_url(request) -> str:
 
 @mcp.tool()
 async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None) -> dict:
-    """A one-time URL to push a file from a shell, so its bytes never pass through your context.
+    """A one-time URL to send a file from a shell, so its bytes never pass through your context.
 
-    Send the file with the returned command (`curl -sS -T <file> <url>`); the response is the
-    same JSON as push_document's: doc_id, tablet path, parts. kind is what you will send: "pdf"
-    (the default), "html" or "markdown" (UTF-8); a body that does not match is refused.
-    ready_selector applies to HTML and Markdown. The URL expires after expires_in_s and works once
-    (a failed upload can be retried with it).
+    kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
+    or "pdf" (the default; keeps its pages, for files that only exist as PDF). ready_selector (HTML)
+    waits for a CSS selector before rendering.
+
+    Run the returned "command" with <file> replaced by the path. curl prints push_document's JSON:
+    keep its doc_id for pull_document. On an error it prints {"detail": ...}: 415 means the file
+    does not match kind (ask again with the right kind), 410 that the URL expired or was used
+    (ask for a new one). Other failures can be retried with the same URL until it expires
+    (expires_in_s). If the shell cannot reach the URL, use push_document instead.
     """
     settings = get_settings()
     try:
@@ -158,16 +168,17 @@ async def poll_now() -> dict:
 
 @mcp.tool()
 async def list_returned(since: str | None = None) -> list[dict]:
-    """Recently pulled documents, and ones that failed to pull, with status, interpretation state and
-    feedback summary. since: ISO date or datetime."""
+    """History of pulls (Outbox and pull_document, external docs included) and failed pulls, newest
+    first, with interpretation state and feedback summary. since: ISO date or datetime. For the docs
+    on the tablet and whether they have new ink, use list_documents."""
     return get_bridge().list_returned(_since(since))
 
 
 @mcp.tool()
 async def get_annotations(doc_id: str) -> list:
-    """State and feedback JSON for a document plus its annotated page strips as images.
+    """State and feedback JSON for a document plus its annotated page strips, as last pulled.
 
-    The strips and highlights are there as soon as the doc is pulled; marks, notes and summary once
+    Does not contact the tablet: for ink added since, use pull_document. The strips and highlights are there as soon as the doc is pulled; marks, notes and summary once
     "interpretation" is "done". A doc that failed to pull carries "failure" with the error.
     """
     return _annotations(doc_id)
@@ -222,5 +233,6 @@ async def remove_document(doc_id: str) -> dict:
 
 @mcp.tool()
 async def list_inbox() -> list[dict]:
-    """Documents waiting in /Inbox on the tablet."""
+    """Documents still in /Inbox on the tablet. To find a doc you pushed, use list_documents: the user
+    may have moved it."""
     return await get_bridge().list_inbox()

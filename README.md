@@ -309,24 +309,25 @@ Approximations to check against the tablet (M0):
 
 Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever credentials your
 proxy asks for on `/mcp` (see Access control).
-To push an artifact, Claude reads it with its own artifact tools and calls
-`push_document(html=...)`. The server can't fetch private artifacts itself.
+The tablet works best with one tall scrolling page, which the server renders from markdown or
+HTML; a PDF keeps its own pages. So the server instructions tell Claude to send the source, never a
+PDF made from it: text it wrote as markdown, an artifact as its HTML (read with its own artifact
+tools; the server can't fetch private artifacts), a Claude Docs doc as its `html` or `markdown`
+export. A PDF goes only when a PDF is all there is.
 
-Anything big goes around the model instead of through it. `push_document(pdf_base64=...)` puts
-every byte through Claude's output, which fails long before a typical PDF export is done. An agent
-with a shell calls `create_upload(title)` instead and runs the command it returns:
+Anything big goes around the model instead of through it: a `push_document` argument passes
+through Claude's output, which fails long before a large document is done. An agent with a shell
+calls `create_upload(title, kind)` instead and runs the command it returns:
 
 ```sh
-curl -sS --fail-with-body -T spec.pdf 'https://<host>/upload/<token>'
+curl -sS --fail-with-body -T spec.md 'https://<host>/upload/<token>'   # create_upload(..., kind="markdown")
 # {"doc_id": "rm-abc123", "title": "Spec", "tablet_path": ["/Inbox/Spec · rm-abc123"], "parts": [...]}
 ```
 
 `kind` says what is sent: `pdf` (the default), `html` or `markdown`; a body that doesn't match
 (no `%PDF-` header, or not UTF-8 text) is refused with 415. The URL is good
 for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
-with it. Guidance in the server instructions: text written in the conversation goes as markdown
-(one tall page); files and artifacts go as PDF via `create_upload`, a Claude Docs doc as its PDF
-export.
+with it.
 
 The round trip needs no folder moves: Claude keeps the doc ID from `push_document`, the user
 annotates the doc wherever it is, and when they say so Claude calls `pull_document(doc_id)`, which
