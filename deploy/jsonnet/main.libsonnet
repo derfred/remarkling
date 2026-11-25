@@ -21,6 +21,8 @@
       [{ name: 'DATA_DIR', value: '/data' }]
       + (if std.objectHas(cfg.env, 'MCP_ALLOWED_HOSTS') then []
          else [{ name: 'MCP_ALLOWED_HOSTS', value: std.join(',', allowedHosts) }])
+      + (if std.objectHas(cfg.env, 'PUBLIC_URL') then []
+         else [{ name: 'PUBLIC_URL', value: 'https://' + cfg.host }])
       + [{ name: k, value: cfg.env[k] } for k in std.objectFields(cfg.env)]
       // Deliberately not optional: a missing Secret or key stops the pods
       // (CreateContainerConfigError) instead of silently falling back to SQLite.
@@ -28,6 +30,31 @@
            name: 'DATABASE_URL',
            valueFrom: { secretKeyRef: { name: cfg.database.secretName, key: cfg.database.key } },
          }]);
+
+    local ingress(name, path, annotations) = {
+      apiVersion: 'networking.k8s.io/v1',
+      kind: 'Ingress',
+      metadata: meta(name) + {
+        annotations: {
+          'cert-manager.io/cluster-issuer': cfg.ingress.clusterIssuer,
+          'nginx.ingress.kubernetes.io/ssl-redirect': 'true',
+          'nginx.ingress.kubernetes.io/proxy-body-size': '50m',
+          'nginx.ingress.kubernetes.io/proxy-read-timeout': '300',
+        } + annotations,
+      },
+      spec: {
+        ingressClassName: cfg.ingress.className,
+        tls: [{ hosts: [cfg.host], secretName: cfg.ingress.tlsSecretName }],
+        rules: [{
+          host: cfg.host,
+          http: { paths: [{
+            path: path,
+            pathType: 'Prefix',
+            backend: { service: { name: cfg.name, port: { name: 'http' } } },
+          }] },
+        }],
+      },
+    };
 
     local container(name, args, resources) = {
       name: name,
@@ -112,29 +139,12 @@
            resources: { requests: { storage: cfg.storage.size } },
          } + (if cfg.storage.storageClass == null then {} else { storageClassName: cfg.storage.storageClass }),
        }])
-    + (if !cfg.ingress.enabled then [] else [{
-         apiVersion: 'networking.k8s.io/v1',
-         kind: 'Ingress',
-         metadata: meta(cfg.name) + {
-           annotations: {
-             'cert-manager.io/cluster-issuer': cfg.ingress.clusterIssuer,
-             'nginx.ingress.kubernetes.io/ssl-redirect': 'true',
-             'nginx.ingress.kubernetes.io/proxy-body-size': '50m',
-             'nginx.ingress.kubernetes.io/proxy-read-timeout': '300',
-           } + cfg.ingress.annotations,
-         },
-         spec: {
-           ingressClassName: cfg.ingress.className,
-           tls: [{ hosts: [cfg.host], secretName: cfg.ingress.tlsSecretName }],
-           rules: [{
-             host: cfg.host,
-             http: { paths: [{
-               path: '/',
-               pathType: 'Prefix',
-               backend: { service: { name: cfg.name, port: { name: 'http' } } },
-             }] },
-           }],
-         },
-       }])
+    + (if !cfg.ingress.enabled then [] else [
+         ingress(cfg.name, '/', cfg.ingress.annotations),
+       ] + (if !cfg.ingress.uploads.enabled then [] else [
+         // create_upload's URLs carry a signed, expiring token and are fetched by agents' shells,
+         // which have no browser session: this path skips the auth annotations of the main one.
+         ingress(cfg.name + '-upload', '/upload/', cfg.ingress.uploads.annotations),
+       ]))
   ),
 }

@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 
 from mcp.server.mcpserver import Image, MCPServer
 
+from .config import get_settings
 from .core.pipeline import get_bridge
+from .uploads import get_uploads
 
 MAX_IMAGES = 10
 
@@ -17,8 +19,13 @@ mcp = MCPServer(
     name="Ink Bridge",
     instructions=(
         "Ink Bridge sends documents to the user's reMarkable tablet and returns their handwritten "
-        "markup as structured feedback. To send a claude.ai artifact, read it with your artifact tools "
-        "and pass its full HTML (CSS and assets inlined) to push_document. After the user says they "
+        "markup as structured feedback. Text you write in the conversation: push_document(markdown=...); "
+        "markdown and HTML become one tall scrolling page, which suits annotation best. A file, an "
+        "artifact or anything over ~50 KB: if you have a shell, call create_upload and send the file "
+        "with the curl command it returns, so the bytes never pass through your context. Artifacts go "
+        "as PDF (a Claude Docs doc: its PDF export; an HTML artifact may also go as its HTML file); "
+        "a PDF keeps its own pages. Without a shell, read a small HTML artifact with your artifact "
+        "tools and pass its full HTML (CSS and assets inlined) to push_document. After the user says they "
         "annotated something, call poll_now, then get_annotations with the doc ID. It returns the annotated "
         "page strips as images, and the interpreted marks once interpretation is done; if interpretation "
         "is pending, off or failed, read the marks from the images yourself. poll_now lists documents that "
@@ -47,8 +54,10 @@ async def push_document(
 ) -> dict:
     """Render content to one tall scrolling PDF page and upload it to /Inbox on the tablet.
 
-    Pass exactly one of html, markdown, pdf_base64 or url (a public URL). ready_selector waits for
-    a CSS selector before rendering (JS-drawn charts, Mermaid). Returns the doc ID and tablet path.
+    Pass exactly one of html, markdown, pdf_base64 or url (a public URL). Prefer markdown for text
+    you wrote. A PDF keeps its own pages. For files and anything large, use create_upload instead:
+    pdf_base64 puts every byte through your context. ready_selector waits for a CSS selector
+    before rendering (JS-drawn charts, Mermaid). Returns the doc ID and tablet path.
     """
     result = await get_bridge().push_document(
         title,
@@ -60,6 +69,31 @@ async def push_document(
         source_kind="artifact" if html else None,
     )
     return {"doc_id": result.doc_id, "tablet_path": result.tablet_paths, "parts": result.parts}
+
+
+@mcp.tool()
+async def create_upload(title: str, kind: str | None = None, ready_selector: str | None = None) -> dict:
+    """A one-time URL to push a file from a shell, so its bytes never pass through your context.
+
+    Send the file with the returned command (`curl -sS -T <file> <url>`); the response is the
+    same JSON as push_document's: doc_id, tablet path, parts. PDFs are detected; for HTML or
+    Markdown pass kind ("html" or "markdown") or send a matching Content-Type. The URL expires
+    after expires_in_s and works once (a failed upload can be retried with it).
+    """
+    settings = get_settings()
+    if not settings.base_url:
+        return {"error": "The server has no PUBLIC_URL (or MCP_ALLOWED_HOSTS) to build upload URLs from."}
+    try:
+        token, grant = get_uploads().create(title, kind, ready_selector)
+    except ValueError as e:
+        return {"error": str(e)}
+    url = f"{settings.base_url}/upload/{token}"
+    return {
+        "upload_url": url,
+        "command": f"curl -sS --fail-with-body -T <file> '{url}'",
+        "expires_in_s": round(grant.expires - datetime.now(timezone.utc).timestamp()),
+        "max_mb": settings.upload_max_mb,
+    }
 
 
 @mcp.tool()

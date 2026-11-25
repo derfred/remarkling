@@ -38,6 +38,12 @@ class Settings:
     trilium_parent_note: str = field(default_factory=lambda: _env("TRILIUM_PARENT_NOTE"))
 
     # Service
+    # The app's external base URL (https://host), for links it hands out: create_upload's URLs.
+    # Empty: https://<first MCP_ALLOWED_HOSTS entry>.
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL").rstrip("/"))
+    # Lifetime of an upload URL, and the largest upload it takes (the Ingress has its own limit).
+    upload_ttl_s: int = field(default_factory=lambda: int(_env("UPLOAD_TTL_S", "900")))
+    upload_max_mb: int = field(default_factory=lambda: int(_env("UPLOAD_MAX_MB", "50")))
     # Host names /mcp answers to (DNS rebinding protection), comma-separated. Empty: any host.
     mcp_allowed_hosts: list[str] = field(
         default_factory=lambda: [h for h in _env("MCP_ALLOWED_HOSTS").split(",") if h]
@@ -59,6 +65,12 @@ class Settings:
     @property
     def db_path(self) -> Path:
         return self.data_dir / "inkbridge.sqlite3"
+
+    @property
+    def base_url(self) -> str:
+        if self.public_url:
+            return self.public_url
+        return f"https://{self.mcp_allowed_hosts[0]}" if self.mcp_allowed_hosts else ""
 
     @property
     def trilium_enabled(self) -> bool:

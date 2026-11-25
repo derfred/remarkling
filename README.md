@@ -37,7 +37,8 @@ inkbridge/
     store.py       # doc state + cache: SQLiteStore or PostgresStore, chosen by DATABASE_URL
     explorer.py    # read-only view of the cache: rebuilds the library from cached blobs
     pipeline.py    # push_document(), poll() = poll_outbox() (pull) + interpret_pending()
-  mcp_server.py    # push_document, poll_now, list_returned, get_annotations, list_inbox
+  mcp_server.py    # push_document, create_upload, poll_now, list_returned, get_annotations, list_inbox
+  uploads.py       # signed one-time upload URLs (create_upload -> PUT /upload/<token>)
   api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll() on cloud websocket notifications (timer fallback)
@@ -175,9 +176,13 @@ the Ingress, internal through the Service):
 | ------- | --------------------------------------------------------- | ----------------------------------- |
 | API     | `/api/`, `/push`, `/poll` (and `/docs`, `/openapi.json`)  | web UI, iPhone Shortcuts, REST      |
 | MCP     | `/mcp`                                                    | claude.ai connector, in-cluster agents |
+| upload  | `/upload/<token>`                                         | agents' shells (`curl -T`), via `create_upload` |
 | public  | `/healthz`, `/`, `/ui/`                                   | probes; the UI's static files (no data) |
 
-Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations).
+Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations),
+except the upload realm: its URLs carry their own credential, a token signed with a key in
+`DATA_DIR/upload.key` that expires after `UPLOAD_TTL_S` (15 min) and works for one upload. The
+jsonnet library gives `/upload/` its own Ingress without the auth annotations for that reason.
 Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
 Without either, the app is open to the internet or to every pod in the cluster.
 
@@ -278,3 +283,18 @@ Add `https://<host>/mcp` as a custom connector in claude.ai, with whatever crede
 Ingress asks for on `/mcp` (see Access control).
 To push an artifact, Claude reads it with its own artifact tools and calls
 `push_document(html=...)`. The server can't fetch private artifacts itself.
+
+Anything big goes around the model instead of through it. `push_document(pdf_base64=...)` puts
+every byte through Claude's output, which fails long before a typical PDF export is done. An agent
+with a shell calls `create_upload(title)` instead and runs the command it returns:
+
+```sh
+curl -sS --fail-with-body -T spec.pdf 'https://<host>/upload/<token>'
+# {"doc_id": "rm-abc123", "title": "Spec", "tablet_path": ["/Inbox/Spec · rm-abc123"], "parts": [...]}
+```
+
+PDFs are detected; HTML and Markdown need `kind` (or a matching `Content-Type`). The URL is good
+for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
+with it. Guidance in the server instructions: text written in the conversation goes as markdown
+(one tall page); files and artifacts go as PDF via `create_upload`, a Claude Docs doc as its PDF
+export.

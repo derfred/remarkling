@@ -1,7 +1,7 @@
 import pytest
 from starlette.testclient import TestClient
 
-from inkbridge import config
+from inkbridge import config, uploads
 from inkbridge.core import pipeline
 from inkbridge.core.store import SQLiteStore
 from fakes import FakeInterpreter, MemoryTransport
@@ -11,6 +11,8 @@ from rmfixtures import line, rm_page, sample_pdf
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PUBLIC_URL", "https://ink.test")
+    monkeypatch.setattr(uploads, "_uploads", None)
     config.get_settings.cache_clear()
     bridge = pipeline.InkBridge(config.get_settings(), SQLiteStore(":memory:"), MemoryTransport(), FakeInterpreter())
     monkeypatch.setattr(pipeline, "_bridge", bridge)
@@ -143,3 +145,51 @@ def test_page_previews_share_one_download(client):
     assert len(calls) == 1
     client.get(f"/api/docs/{u}/render.pdf")  # a download is always fresh
     assert len(calls) == 2
+
+
+def _upload_url(**kw):
+    token, _ = uploads.get_uploads().create(**{"title": "Spec", **kw})
+    return f"/upload/{token}"
+
+
+def test_upload_pdf_once(client):
+    url = _upload_url()
+    r = client.put(url, content=sample_pdf())
+    assert r.status_code == 200, r.text
+    doc = client.bridge.store.get(r.json()["doc_id"])
+    assert doc.title == "Spec" and doc.source_kind == "pdf" and doc.source_ref == "upload"
+    assert r.json()["tablet_path"] == [f"/Inbox/Spec · {doc.doc_id}"]
+    assert client.put(url, content=sample_pdf()).status_code == 410
+
+
+def test_upload_markdown_and_html(client, monkeypatch):
+    calls = []
+
+    async def fake_push(title, **kw):
+        calls.append((title, kw))
+        return pipeline.PushResult("rm-aaaaaa", title, ["/Inbox/x"], ["rm-aaaaaa"])
+
+    monkeypatch.setattr(client.bridge, "push_document", fake_push)
+    assert client.put(_upload_url(kind="markdown"), content="# Hi".encode()).status_code == 200
+    r = client.post(_upload_url(ready_selector="#done"), content=b"<p>x</p>",
+                    headers={"Content-Type": "text/html"})
+    assert r.status_code == 200
+    assert calls[0] == ("Spec", {"markdown": "# Hi", "ready_selector": None, "source_ref": "upload"})
+    assert calls[1] == ("Spec", {"html": "<p>x</p>", "ready_selector": "#done", "source_ref": "upload"})
+
+
+def test_failed_upload_can_be_retried(client, monkeypatch):
+    url = _upload_url()
+    assert client.put(url, content=b"\x00\x01").status_code == 415
+    assert client.put(url, content=b"").status_code == 400
+    assert client.put(url, content=sample_pdf()).status_code == 200
+
+
+def test_upload_size_limit(client, monkeypatch):
+    monkeypatch.setenv("UPLOAD_MAX_MB", "0")
+    config.get_settings.cache_clear()
+    assert client.put(_upload_url(), content=sample_pdf()).status_code == 413
+
+
+def test_bad_upload_tokens(client):
+    assert client.put("/upload/nonsense", content=sample_pdf()).status_code == 403

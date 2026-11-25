@@ -21,7 +21,7 @@ def _blocks(result):
 
 async def test_tools_listed():
     names = {t.name for t in await mcp.list_tools()}
-    assert names == {"push_document", "poll_now", "list_returned", "get_annotations", "list_inbox"}
+    assert names == {"push_document", "create_upload", "poll_now", "list_returned", "get_annotations", "list_inbox"}
 
 
 async def test_round_trip_through_tools(bridge):
@@ -54,3 +54,27 @@ async def test_poll_now_reports_failures(bridge):
     blocks = _blocks(await mcp.call_tool("get_annotations", {"doc_id": failed["doc_id"]}))
     assert json.loads(blocks[0].text)["failure"]["stage"] == "render"
     assert "No pulled annotations" in blocks[1].text
+
+
+async def test_create_upload(bridge, monkeypatch, tmp_path):
+    import json
+
+    from inkbridge import config, uploads
+
+    monkeypatch.setattr(uploads, "_uploads", uploads.Uploads(b"k" * 32))
+    monkeypatch.setattr(config, "get_settings", lambda: config.Settings(data_dir=tmp_path, mcp_allowed_hosts=["ink.test"]))
+    from inkbridge import mcp_server
+    monkeypatch.setattr(mcp_server, "get_settings", config.get_settings)
+
+    result = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "Spec"}))[0].text)
+    assert result["upload_url"].startswith("https://ink.test/upload/")
+    assert result["command"].endswith(f"-T <file> '{result['upload_url']}'")
+    assert 0 < result["expires_in_s"] <= 900
+    token = result["upload_url"].rsplit("/", 1)[1]
+    assert uploads.get_uploads().check(token).title == "Spec"
+
+    bad = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x", "kind": "docx"}))[0].text)
+    assert "kind must be" in bad["error"]
+    monkeypatch.setattr(mcp_server, "get_settings", lambda: config.Settings(data_dir=tmp_path))
+    none = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x"}))[0].text)
+    assert "PUBLIC_URL" in none["error"]

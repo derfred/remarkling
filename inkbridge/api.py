@@ -4,6 +4,8 @@ The app does no authentication: whoever can reach it can use it. Access control 
 infrastructure in front of it (ingress auth, NetworkPolicy, a mesh), split by path:
   /mcp                       MCP realm (claude.ai connector)
   /api/, /push, /poll         API realm (web UI, Shortcuts, REST)
+  /upload/<token>             upload realm: the signed token is the credential (see uploads.py),
+                              so it must be reachable without the API realm's auth
   /docs, /redoc, /openapi.json the API's schema; no data
   /healthz, /, /ui/           no data; the UI's calls go to /api/
 """
@@ -18,7 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path, PurePath
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 from starlette.staticfiles import StaticFiles
@@ -29,6 +31,7 @@ from .core.pipeline import get_bridge
 from .core.renderer import PageNotFound, Renderer
 from .core.cloud import RemoteDoc
 from .mcp_server import mcp
+from .uploads import UploadError, get_uploads, sniff_kind
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
@@ -165,6 +168,42 @@ def create_app() -> FastAPI:
             else:
                 raise HTTPException(415, f"unsupported file type {ctype or suffix}")
         return {"doc_id": result.doc_id, "title": result.title}
+
+    @app.api_route("/upload/{token}", methods=["PUT", "POST"])
+    async def upload(token: str, request: Request):
+        """The body of a create_upload URL: a PDF, HTML or Markdown file, e.g. `curl -T spec.pdf <url>`."""
+        uploads = get_uploads()
+        try:
+            grant = uploads.claim(token)
+        except UploadError as e:
+            raise HTTPException(e.status, str(e)) from e
+        try:
+            limit = get_settings().upload_max_mb * 2**20
+            body = bytearray()
+            async for chunk in request.stream():
+                body += chunk
+                if len(body) > limit:
+                    raise UploadError(413, f"upload larger than {get_settings().upload_max_mb} MB")
+            if not body:
+                raise UploadError(400, "empty upload")
+            data = bytes(body)
+            kind = sniff_kind(data, request.headers.get("content-type", ""), grant.kind)
+            content: dict = {"pdf": data} if kind == "pdf" else {kind: data.decode("utf-8-sig")}
+            result = await get_bridge().push_document(
+                grant.title, **content, ready_selector=grant.ready_selector if kind != "pdf" else None,
+                source_ref="upload",
+            )
+        except UploadError as e:
+            uploads.release(grant)
+            raise HTTPException(e.status, str(e)) from e
+        except (UnicodeDecodeError, ValueError) as e:
+            uploads.release(grant)
+            raise HTTPException(400, f"unusable upload: {e}") from e
+        except BaseException:
+            uploads.release(grant)
+            raise
+        return {"doc_id": result.doc_id, "title": result.title, "tablet_path": result.tablet_paths,
+                "parts": result.parts}
 
     # --- cache explorer: read-only REST API under /api/cache, web UI at /ui ---------------------
 
