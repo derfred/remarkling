@@ -23,7 +23,9 @@ mcp = MCPServer(
         "Layout: the tablet works best with one tall scrolling page, which the server renders from "
         "markdown or HTML. A PDF is passed through with its own pages, so never make a PDF from content "
         "that has a source: send the source and let the server render it. Send a PDF only when a PDF is "
-        "all there is (a paper, a scan, a file the user gave you).\n\n"
+        "all there is (a paper, a scan, a file the user gave you). If that PDF is one flowing text that "
+        "an export or a print cut into pages, send it with layout=\"tall\" to have the server join "
+        "the pages; not for slides, scans, forms or papers whose pages stand on their own.\n\n"
         "Sending (each way returns a doc_id; keep it, every later call needs it):\n"
         "- Text you wrote: push_document(markdown=...).\n"
         "- A Claude Docs doc: not through your artifact tools (they return its viewer, not its content). "
@@ -76,6 +78,7 @@ async def push_document(
     pdf_base64: str | None = None,
     url: str | None = None,
     ready_selector: str | None = None,
+    layout: str = "pages",
 ) -> dict:
     """Upload content to /Inbox on the tablet. Returns doc_id (keep it), tablet path and parts.
 
@@ -85,6 +88,7 @@ async def push_document(
     keeps its own pages, so pass one only when no source exists, and only a small one: every byte
     goes through your context. Files and anything over ~50 KB go through create_upload.
     ready_selector (HTML, url) waits for a CSS selector before rendering: JS-drawn charts, Mermaid.
+    layout (PDFs): "pages" or "tall", as for create_upload.
     """
     result = await get_bridge().push_document(
         title,
@@ -94,8 +98,10 @@ async def push_document(
         url=url,
         ready_selector=ready_selector,
         source_kind="artifact" if html else None,
+        layout=layout,
     )
-    return {"doc_id": result.doc_id, "tablet_path": result.tablet_paths, "parts": result.parts}
+    out = {"doc_id": result.doc_id, "tablet_path": result.tablet_paths, "parts": result.parts}
+    return {**out, "layout": result.layout} if result.layout else out
 
 
 def _first(value: str | None) -> str:
@@ -122,7 +128,8 @@ def request_base_url(request) -> str:
 
 
 @mcp.tool()
-async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None) -> dict:
+async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None,
+                        layout: str = "pages") -> dict:
     """A one-time URL to send a file from a shell, so its bytes never pass through your context.
 
     kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
@@ -134,7 +141,17 @@ async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selec
     does not match kind (ask again with the right kind), 410 that the URL expired or was used
     (ask for a new one). Other failures can be retried with the same URL until it expires
     (expires_in_s). If the shell cannot reach the URL, use push_document instead.
+
+    layout (PDFs only): "pages" (default) keeps the PDF's pages. "tall" joins them into one tall
+    page, cropping margins and running headers/footers (page numbers), for a document that flows
+    as one text and was only cut into pages by an export or a print. Not for slides, scans, forms
+    or papers whose pages stand on their own. The server keeps the pages when the PDF does not
+    fit (pages of different widths, no text layer) and says why in the response's "layout".
     """
+    if layout not in ("pages", "tall"):
+        return {"error": 'layout must be "pages" or "tall"'}
+    if layout == "tall" and kind != "pdf":
+        return {"error": 'layout="tall" applies to PDFs; markdown and HTML always become one tall page'}
     settings = get_settings()
     try:
         request = ctx.request_context.request
@@ -147,7 +164,7 @@ async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selec
         token, grant = get_uploads().create(title, kind, ready_selector)
     except ValueError as e:
         return {"error": str(e)}
-    url = f"{base}/upload/{token}"
+    url = f"{base}/upload/{token}" + ("?layout=tall" if layout == "tall" else "")
     return {
         "upload_url": url,
         "command": f"curl -sS --fail-with-body -T <file> '{url}'",

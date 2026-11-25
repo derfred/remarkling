@@ -370,3 +370,17 @@ async def test_interpretation_result_is_dropped_if_the_doc_was_pulled_again(brid
     await bridge._interpret(doc)
     assert bridge.store.get(pushed.doc_id).interpret_status == "pending"
     await bridge.drain()
+
+
+async def test_push_pdf_with_layout_tall_joins_its_pages(bridge):
+    from test_joinpdf import paged_pdf
+
+    pushed = await bridge.push_document("Export", pdf=paged_pdf(4))
+    assert pushed.layout == {"layout": "pages"}
+    tall = await bridge.push_document("Export", pdf=paged_pdf(4), layout="tall")
+    assert tall.layout["layout"] == "tall" and tall.layout["joined"] == 4
+    import pymupdf
+    with pymupdf.open(bridge.store.get(tall.doc_id).path / "original.pdf") as d:
+        assert d.page_count == 1  # what went to the tablet, and what ink is drawn over later
+    with pytest.raises(ValueError):
+        await bridge.push_document("x", pdf=paged_pdf(2), layout="wide")

@@ -332,6 +332,28 @@ curl -sS --fail-with-body -T spec.md 'https://<host>/upload/<token>'   # create_
 for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
 with it.
 
+### Joining a PDF's pages (`layout="tall"`)
+
+A PDF that only exists as a PDF can still go as one tall page: `push_document(..., layout="tall")`,
+`create_upload(..., layout="tall")` (which puts `?layout=tall` in the URL), `POST /push` with a
+`layout=tall` form field, or `inkbridge push file.pdf --layout tall`. It is opt-in and never
+applied unasked (`core/joinpdf.py`):
+
+- Each page is cropped to what it paints, ignoring full-page backgrounds, and the crops are stacked
+  on one page as vectors, so text stays text. Blank pages are dropped. Over 14,000 pt (PDF's limit
+  is 14,400) the result continues on a second tall page.
+- Running headers and footers are cut: a line in the top or bottom 12 % of at least 60 % of the
+  pages, at the same height, with numbers masked ("Page 2 of 9"). From three pages up; a title
+  that repeats the header's words lower down is kept.
+- The pages are kept as they are, with the reason in the response's `layout`, when they differ in
+  width, are rotated, or more than a fifth of them paint something without a text layer (a scan).
+
+Meant for one flowing text cut into pages by an export or a print: browser "Save as PDF", Word or
+Docs exports. Not for slides, scans, forms or papers whose pages stand on their own; the server
+can't tell those apart reliably, which is why the agent decides. A table split across a page break
+stays split: the gap below its first half remains, and a header row the export repeated appears
+again. For a Claude Docs doc the `markdown` export is still the better path.
+
 The round trip needs no folder moves: Claude keeps the doc ID from `push_document`, the user
 annotates the doc wherever it is, and when they say so Claude calls `pull_document(doc_id)`, which
 returns the annotated strips as images (and the marks, once interpreted). `document_status` and

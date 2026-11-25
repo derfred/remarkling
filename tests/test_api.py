@@ -178,8 +178,8 @@ def test_upload_markdown_and_html(client, monkeypatch):
     r = client.put(_upload_url(), content=b"<p>x</p>", headers={"Content-Type": "text/html"})
     assert r.status_code == 415 and "not a PDF" in r.json()["detail"]
     assert len(calls) == 2
-    assert calls[0] == ("Spec", {"markdown": "# Hi", "ready_selector": None, "source_ref": "upload"})
-    assert calls[1] == ("Spec", {"html": "<p>x</p>", "ready_selector": "#done", "source_ref": "upload"})
+    assert calls[0] == ("Spec", {"markdown": "# Hi", "ready_selector": None, "source_ref": "upload", "layout": "pages"})
+    assert calls[1] == ("Spec", {"html": "<p>x</p>", "ready_selector": "#done", "source_ref": "upload", "layout": "pages"})
 
 
 def test_failed_upload_can_be_retried(client, monkeypatch):
@@ -197,3 +197,14 @@ def test_upload_size_limit(client, monkeypatch):
 
 def test_bad_upload_tokens(client):
     assert client.put("/upload/nonsense", content=sample_pdf()).status_code == 403
+
+
+def test_upload_with_layout_tall(client):
+    from test_joinpdf import paged_pdf
+
+    r = client.put(_upload_url() + "?layout=tall", content=paged_pdf(4))
+    assert r.status_code == 200, r.text
+    assert r.json()["layout"]["layout"] == "tall" and r.json()["layout"]["joined"] == 4
+    url = _upload_url()
+    assert client.put(url + "?layout=wide", content=paged_pdf(2)).status_code == 422
+    assert client.put(url, content=paged_pdf(2)).json()["layout"] == {"layout": "pages"}  # not claimed by the 422
