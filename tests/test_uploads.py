@@ -5,7 +5,7 @@ import pytest
 
 from inkbridge import uploads
 from inkbridge.core.store import SQLiteStore
-from inkbridge.uploads import UploadError, Uploads, sniff_kind, token_hash
+from inkbridge.uploads import UploadError, Uploads, token_hash, upload_content
 
 
 @pytest.fixture
@@ -88,20 +88,16 @@ def test_unknown_kind_is_refused(grants):
         grants.create("x", "docx")
 
 
-@pytest.mark.parametrize("data,ctype,kind,expected", [
-    (b"%PDF-1.7 ...", "", None, "pdf"),
-    (b"%PDF-1.7 ...", "text/html", "html", "pdf"),
-    (b"# Title", "", "markdown", "markdown"),
-    (b"<p>x</p>", "text/html; charset=utf-8", None, "html"),
-    (b"# Title", "text/markdown", None, "markdown"),
-    (b"  <!DOCTYPE html><html>", "application/octet-stream", None, "html"),
-])
-def test_sniff_kind(data, ctype, kind, expected):
-    assert sniff_kind(data, ctype, kind) == expected
+def test_default_kind_is_pdf(grants):
+    token, _ = grants.create("Spec")
+    assert grants.claim(token).kind == "pdf"
 
 
-def test_sniff_kind_refuses():
-    with pytest.raises(UploadError):
-        sniff_kind(b"# not a pdf", "", "pdf")
-    with pytest.raises(UploadError):
-        sniff_kind(b"\x00\x01", "application/octet-stream", None)
+def test_upload_content():
+    assert upload_content(b"%PDF-1.7 ...", "pdf") == {"pdf": b"%PDF-1.7 ..."}
+    assert upload_content("# Tïtle".encode(), "markdown") == {"markdown": "# Tïtle"}
+    assert upload_content(b"\xef\xbb\xbf<p>x</p>", "html") == {"html": "<p>x</p>"}  # BOM dropped
+    for data, kind in ((b"# not a pdf", "pdf"), (b"\xff\xfe\x00", "markdown"), (b"%PDF-\xff", "html")):
+        with pytest.raises(UploadError) as e:
+            upload_content(data, kind)
+        assert e.value.status == 415

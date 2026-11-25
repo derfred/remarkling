@@ -321,7 +321,8 @@ curl -sS --fail-with-body -T spec.pdf 'https://<host>/upload/<token>'
 # {"doc_id": "rm-abc123", "title": "Spec", "tablet_path": ["/Inbox/Spec · rm-abc123"], "parts": [...]}
 ```
 
-PDFs are detected; HTML and Markdown need `kind` (or a matching `Content-Type`). The URL is good
+`kind` says what is sent: `pdf` (the default), `html` or `markdown`; a body that doesn't match
+(no `%PDF-` header, or not UTF-8 text) is refused with 415. The URL is good
 for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
 with it. Guidance in the server instructions: text written in the conversation goes as markdown
 (one tall page); files and artifacts go as PDF via `create_upload`, a Claude Docs doc as its PDF

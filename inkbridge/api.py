@@ -31,7 +31,7 @@ from .core.pipeline import get_bridge
 from .core.renderer import PageNotFound, Renderer
 from .core.cloud import RemoteDoc
 from .mcp_server import mcp
-from .uploads import UploadError, get_uploads, sniff_kind
+from .uploads import UploadError, get_uploads, upload_content
 
 MARKDOWN_SUFFIXES = {".md", ".markdown", ".txt"}
 HTML_SUFFIXES = {".html", ".htm"}
@@ -186,17 +186,15 @@ def create_app() -> FastAPI:
                     raise UploadError(413, f"upload larger than {get_settings().upload_max_mb} MB")
             if not body:
                 raise UploadError(400, "empty upload")
-            data = bytes(body)
-            kind = sniff_kind(data, request.headers.get("content-type", ""), grant.kind)
-            content: dict = {"pdf": data} if kind == "pdf" else {kind: data.decode("utf-8-sig")}
+            content = upload_content(bytes(body), grant.kind)
             result = await get_bridge().push_document(
-                grant.title, **content, ready_selector=grant.ready_selector if kind != "pdf" else None,
+                grant.title, **content, ready_selector=grant.ready_selector if grant.kind != "pdf" else None,
                 source_ref="upload",
             )
         except UploadError as e:
             uploads.release(grant)
             raise HTTPException(e.status, str(e)) from e
-        except (UnicodeDecodeError, ValueError) as e:
+        except ValueError as e:
             uploads.release(grant)
             raise HTTPException(400, f"unusable upload: {e}") from e
         except BaseException:

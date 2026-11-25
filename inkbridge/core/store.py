@@ -89,7 +89,7 @@ MIGRATIONS: list[str] = [
     CREATE TABLE IF NOT EXISTS uploads (
       token_hash     TEXT PRIMARY KEY,                                     -- sha256 hex of the URL's token
       title          TEXT NOT NULL,
-      kind           TEXT,                                                 -- pdf | html | markdown; NULL: sniffed
+      kind           TEXT,                                                 -- pdf | html | markdown
       ready_selector TEXT,
       created_at     {float} NOT NULL,
       expires_at     {float} NOT NULL,

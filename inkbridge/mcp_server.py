@@ -23,7 +23,8 @@ mcp = MCPServer(
         "markdown and HTML become one tall scrolling page, which suits annotation best. A file, an "
         "artifact or anything over ~50 KB: if you have a shell, call create_upload and send the file "
         "with the curl command it returns, so the bytes never pass through your context. Artifacts go "
-        "as PDF (a Claude Docs doc: its PDF export; an HTML artifact may also go as its HTML file); "
+        "as PDF (a Claude Docs doc: its PDF export; an HTML artifact may also go as its HTML file, "
+        "with kind=\"html\"); "
         "a PDF keeps its own pages. Without a shell, read a small HTML artifact with your artifact "
         "tools and pass its full HTML (CSS and assets inlined) to push_document. Keep the doc ID it returns: "
         "the document is tracked by it wherever the user files it, so they need not move it anywhere. "
@@ -112,13 +113,14 @@ def request_base_url(request) -> str:
 
 
 @mcp.tool()
-async def create_upload(title: str, ctx: Context, kind: str | None = None, ready_selector: str | None = None) -> dict:
+async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None) -> dict:
     """A one-time URL to push a file from a shell, so its bytes never pass through your context.
 
     Send the file with the returned command (`curl -sS -T <file> <url>`); the response is the
-    same JSON as push_document's: doc_id, tablet path, parts. PDFs are detected; for HTML or
-    Markdown pass kind ("html" or "markdown") or send a matching Content-Type. The URL expires
-    after expires_in_s and works once (a failed upload can be retried with it).
+    same JSON as push_document's: doc_id, tablet path, parts. kind is what you will send: "pdf"
+    (the default), "html" or "markdown" (UTF-8); a body that does not match is refused.
+    ready_selector applies to HTML and Markdown. The URL expires after expires_in_s and works once
+    (a failed upload can be retried with it).
     """
     settings = get_settings()
     try:

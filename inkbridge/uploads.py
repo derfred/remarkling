@@ -32,7 +32,7 @@ class UploadError(Exception):
 @dataclass
 class Grant:
     title: str
-    kind: str | None  # pdf | html | markdown; None: from the body and Content-Type
+    kind: str  # pdf | html | markdown, declared by create_upload
     ready_selector: str | None
     expires: float
     token_hash: str
@@ -47,8 +47,8 @@ class Uploads:
         self.store = store
         self.ttl_s = ttl_s
 
-    def create(self, title: str, kind: str | None = None, ready_selector: str | None = None) -> tuple[str, Grant]:
-        if kind is not None and kind not in KINDS:
+    def create(self, title: str, kind: str = "pdf", ready_selector: str | None = None) -> tuple[str, Grant]:
+        if kind not in KINDS:
             raise ValueError(f"kind must be one of {', '.join(KINDS)}")
         token = secrets.token_urlsafe(24)
         t = time.time()
@@ -78,24 +78,16 @@ class Uploads:
         self.store.upload_done(grant.token_hash, doc_id)
 
 
-def sniff_kind(data: bytes, content_type: str, grant_kind: str | None) -> str:
-    """pdf by magic bytes; otherwise the grant's kind, then the Content-Type; else an error."""
-    if data[:5] == b"%PDF-":
-        return "pdf"
-    if grant_kind == "pdf":
-        raise UploadError(415, "the upload is not a PDF")
-    if grant_kind:
-        return grant_kind
-    ctype = content_type.split(";")[0].strip().lower()
-    if ctype in ("text/html", "application/xhtml+xml"):
-        return "html"
-    if ctype in ("text/markdown", "text/x-markdown", "text/plain"):
-        return "markdown"
-    head = data[:512].lstrip().lower()
-    if head.startswith((b"<!doctype html", b"<html")):
-        return "html"
-    raise UploadError(415, "unknown file type: send a PDF, or ask create_upload for kind html or markdown")
-
+def upload_content(data: bytes, kind: str) -> dict[str, str | bytes]:
+    """push_document's content argument for an upload of the grant's kind; checks the body fits it."""
+    if kind == "pdf":
+        if data[:5] != b"%PDF-":
+            raise UploadError(415, 'not a PDF; for HTML or Markdown ask create_upload with kind="html" or "markdown"')
+        return {"pdf": data}
+    try:
+        return {kind: data.decode("utf-8-sig")}
+    except UnicodeDecodeError as e:
+        raise UploadError(415, f"not UTF-8 text, which kind {kind!r} needs") from e
 
 
 def get_uploads() -> Uploads:

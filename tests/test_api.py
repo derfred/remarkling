@@ -172,9 +172,12 @@ def test_upload_markdown_and_html(client, monkeypatch):
 
     monkeypatch.setattr(client.bridge, "push_document", fake_push)
     assert client.put(_upload_url(kind="markdown"), content="# Hi".encode()).status_code == 200
-    r = client.post(_upload_url(ready_selector="#done"), content=b"<p>x</p>",
-                    headers={"Content-Type": "text/html"})
+    r = client.post(_upload_url(kind="html", ready_selector="#done"), content=b"<p>x</p>")
     assert r.status_code == 200
+    # The declared kind decides, not the Content-Type: a PDF grant refuses HTML.
+    r = client.put(_upload_url(), content=b"<p>x</p>", headers={"Content-Type": "text/html"})
+    assert r.status_code == 415 and "not a PDF" in r.json()["detail"]
+    assert len(calls) == 2
     assert calls[0] == ("Spec", {"markdown": "# Hi", "ready_selector": None, "source_ref": "upload"})
     assert calls[1] == ("Spec", {"html": "<p>x</p>", "ready_selector": "#done", "source_ref": "upload"})
 
