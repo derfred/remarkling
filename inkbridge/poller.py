@@ -86,6 +86,8 @@ async def run(bridge: InkBridge, settings: Settings, debounce_s: float = DEBOUNC
                 result = await bridge.poll()
                 for d in result.pulled:
                     log.info("pulled %s %r: interpretation %s", d.doc_id, d.title, d.interpretation)
+                for c in result.changed:
+                    log.info("new ink on %s %r in %s (%d pages)", c.doc_id, c.title, c.location, c.changed_pages)
                 for f in result.failed:
                     log.warning("%s %r failed at %s (attempt %d): %s", f.doc_id, f.title, f.stage, f.attempts, f.error)
                 if time.time() - last_prune > 86400:
