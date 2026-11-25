@@ -19,6 +19,12 @@
   // default for MCP_ALLOWED_HOSTS. null: in-cluster names only.
   host: null,
 
+  // Base URL of the upload links create_upload hands out (PUBLIC_URL), e.g.
+  // 'https://remarkling.example.com'. null: taken from each MCP request
+  // (X-Forwarded-Proto/-Host/-Prefix, else Host), which suits most proxies.
+  // Set it when the proxy in front rewrites the host without forwarding it.
+  publicUrl: null,
+
   // Every key of this Secret becomes an env var of both containers (see
   // inkbridge/config.py). Credentials: RM_DEVICE_TOKEN, ANTHROPIC_API_KEY,
   // TRILIUM_ETAPI_TOKEN. Created by the platform.

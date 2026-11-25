@@ -207,7 +207,8 @@ limit should allow `UPLOAD_MAX_MB` (50 MB).
 `X-Forwarded-Host` and `X-Forwarded-Prefix` if the proxy sets them (ingress-nginx does), else the
 `Host` header. An agent connected through the public host gets a public URL, one connected
 through the Service a Service URL, so it needs no configuration in or out of the cluster.
-`PUBLIC_URL` overrides it, for a proxy that rewrites the host without saying so.
+`PUBLIC_URL` (the library's optional `publicUrl`) overrides it, for a proxy that rewrites the host
+without saying so.
 Internally, restrict who can reach the Service (NetworkPolicy, or a mesh for per-path rules).
 Without either, the app is open to the internet or to every pod in the cluster.
 

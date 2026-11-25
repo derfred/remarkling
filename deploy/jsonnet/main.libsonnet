@@ -21,6 +21,8 @@
       [{ name: 'DATA_DIR', value: '/data' }]
       + (if std.objectHas(cfg.env, 'MCP_ALLOWED_HOSTS') then []
          else [{ name: 'MCP_ALLOWED_HOSTS', value: std.join(',', allowedHosts) }])
+      + (if cfg.publicUrl == null || std.objectHas(cfg.env, 'PUBLIC_URL') then []
+         else [{ name: 'PUBLIC_URL', value: cfg.publicUrl }])
       + [{ name: k, value: cfg.env[k] } for k in std.objectFields(cfg.env)]
       // Deliberately not optional: a missing Secret or key stops the pods
       // (CreateContainerConfigError) instead of silently falling back to SQLite.
