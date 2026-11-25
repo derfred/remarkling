@@ -134,7 +134,11 @@ class Interpreter:
         if client is None:
             from anthropic import AsyncAnthropic
 
-            client = AsyncAnthropic(api_key=api_key or None)
+            if not api_key:
+                raise ValueError("Interpreter needs an Anthropic API key")
+            # Passed explicitly so the SDK never falls back to other credentials in the environment
+            # (ANTHROPIC_AUTH_TOKEN, profiles), which is how a stale token once caused 401s.
+            client = AsyncAnthropic(api_key=api_key)
         self.client = client
         self.model = model
         self.prompt = load_prompt()

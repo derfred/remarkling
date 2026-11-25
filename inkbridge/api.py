@@ -161,15 +161,16 @@ def create_app() -> ASGIApp:
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True}
+        return {"ok": True, "interpretation": "on" if get_settings().anthropic_api_key else "off"}
 
     @app.post("/poll")
     async def poll():
-        docs = await get_bridge().poll_outbox()
+        result = await get_bridge().poll()
         return {
-            "count": len(docs),
-            "titles": [d.title for d in docs],
-            "trilium_url": docs[0].trilium_url if docs else None,
+            "count": len(result.pulled),
+            "titles": [d.title for d in result.pulled],
+            "trilium_url": result.pulled[0].trilium_url if result.pulled else None,
+            "failed": [{"title": f.title, "stage": f.stage, "error": f.error} for f in result.failed],
         }
 
     @app.post("/push")

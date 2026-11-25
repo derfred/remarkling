@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS docs (
   source_ref      TEXT,
   rm_uuid         TEXT,
   rm_hash         TEXT,               -- transport-specific version of the last processed download
-  status          TEXT NOT NULL,      -- pushed | pulled | external
+  status          TEXT NOT NULL,      -- pushed | pulled | failed | external
   trilium_note_id TEXT,
   trilium_url     TEXT,
   pushed_at       {float},
@@ -50,6 +50,21 @@ CREATE TABLE IF NOT EXISTS cache (
   created_at {float} NOT NULL
 );
 """
+
+# Columns added after the first release. `migrations()` adds any that an existing table lacks, so
+# they are not in SCHEMA. A pull failure is kept on the doc until a later pull of it succeeds;
+# interpretation (handwriting -> marks) runs after the pull and keeps its own status.
+ADDED_COLUMNS = {
+    "error": "TEXT",                           # last pull failure, "<ExceptionType>: <message>"
+    "error_stage": "TEXT",                     # download | render | save
+    "error_version": "TEXT",                   # the rm_hash (remote version) that failed
+    "attempts": "INTEGER NOT NULL DEFAULT 0",  # consecutive failures of that version
+    "failed_at": "{float}",
+    "interpret_status": "TEXT",                # pending | done | failed | off; NULL before this column
+    "interpret_error": "TEXT",
+    "interpret_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "interpret_failed_at": "{float}",
+}
 
 # Rows per IN (...) list; far below SQLite's and Postgres's parameter limits.
 _CHUNK = 500
@@ -71,6 +86,15 @@ class Doc:
     pulled_at: float | None = None
     feedback: dict[str, Any] | None = None
     dir: str | None = None
+    error: str | None = None
+    error_stage: str | None = None
+    error_version: str | None = None
+    attempts: int = 0
+    failed_at: float | None = None
+    interpret_status: str | None = None
+    interpret_error: str | None = None
+    interpret_attempts: int = 0
+    interpret_failed_at: float | None = None
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
@@ -80,7 +104,7 @@ class Doc:
 
 _COLUMNS = [
     "doc_id", "base_id", "title", "source_kind", "source_ref", "rm_uuid", "rm_hash", "status",
-    "trilium_note_id", "trilium_url", "pushed_at", "pulled_at", "feedback", "dir",
+    "trilium_note_id", "trilium_url", "pushed_at", "pulled_at", "feedback", "dir", *ADDED_COLUMNS,
 ]
 
 
@@ -129,10 +153,26 @@ class Store(ABC):
     def by_rm_uuid(self, rm_uuid: str) -> Doc | None:
         return self._one("SELECT * FROM docs WHERE rm_uuid = ?", (rm_uuid,))
 
+    def delete(self, doc_id: str) -> None:
+        self._execute("DELETE FROM docs WHERE doc_id = ?", (doc_id,))
+
     def returned(self, since: float | None = None, limit: int = 20) -> list[Doc]:
+        """Docs pulled, or failed to pull, since `since`; the most recent event first."""
         return self._many(
-            "SELECT * FROM docs WHERE pulled_at IS NOT NULL AND pulled_at >= ? ORDER BY pulled_at DESC LIMIT ?",
-            (since or 0, limit),
+            "SELECT * FROM docs WHERE (pulled_at IS NOT NULL AND pulled_at >= ?) "
+            "OR (failed_at IS NOT NULL AND failed_at >= ?) "
+            "ORDER BY COALESCE(failed_at, pulled_at) DESC LIMIT ?",
+            (since or 0, since or 0, limit),
+        )
+
+    def interpret_due(self) -> list[Doc]:
+        """Pulled docs whose interpretation has not run or failed, and whose files are still there.
+
+        The caller applies the retry backoff to the failed ones."""
+        return self._many(
+            "SELECT * FROM docs WHERE dir IS NOT NULL AND interpret_status IN ('pending', 'failed') "
+            "ORDER BY pulled_at",
+            (),
         )
 
     def older_than(self, cutoff: float) -> list[Doc]:
@@ -194,6 +234,10 @@ class SQLiteStore(Store):
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(SCHEMA.format(float="REAL"))
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(docs)").fetchall()}
+        with self._conn:
+            for stmt in migrations(have, "REAL"):
+                self._conn.execute(stmt)
 
     def _fetch(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
@@ -226,6 +270,11 @@ class PostgresStore(Store):
             # Serialise schema creation between containers starting at the same time.
             self._conn.execute("SELECT pg_advisory_xact_lock(hashtext('inkbridge.schema'))")
             for stmt in _statements(SCHEMA.format(float="DOUBLE PRECISION")):
+                self._conn.execute(stmt)
+            have = {r["column_name"] for r in self._conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'docs' "
+                "AND table_schema = current_schema()").fetchall()}
+            for stmt in migrations(have, "DOUBLE PRECISION"):
                 self._conn.execute(stmt)
 
     def _connect(self):
@@ -296,6 +345,12 @@ def sqlite_path(url: str) -> str:
     if "?" in rest:
         raise ValueError("sqlite URLs take no query parameters")
     return rest[1:]
+
+
+def migrations(have: set[str], float_type: str) -> list[str]:
+    """ALTER statements that add the ADDED_COLUMNS missing from a docs table with columns `have`."""
+    return [f"ALTER TABLE docs ADD COLUMN {name} {decl.format(float=float_type)}"
+            for name, decl in ADDED_COLUMNS.items() if name not in have]
 
 
 def _statements(script: str) -> list[str]:

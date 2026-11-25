@@ -1,4 +1,4 @@
-"""Background loop: run poll_outbox() when the reMarkable cloud says something synced.
+"""Background loop: run poll() when the reMarkable cloud says something synced.
 
 The cloud's notifications websocket wakes the loop: every sync (the tablet's, or a root swap by any
 other client) sends one message. A slow timer (POLL_FALLBACK_S) covers lost messages. Without a
@@ -87,9 +87,11 @@ async def run(bridge: InkBridge, settings: Settings, debounce_s: float = DEBOUNC
                 pass
             wake.clear()
             try:
-                docs = await bridge.poll_outbox()
-                for d in docs:
-                    log.info("pulled %s %r: %d marks", d.doc_id, d.title, d.marks)
+                result = await bridge.poll()
+                for d in result.pulled:
+                    log.info("pulled %s %r: interpretation %s", d.doc_id, d.title, d.interpretation)
+                for f in result.failed:
+                    log.warning("%s %r failed at %s (attempt %d): %s", f.doc_id, f.title, f.stage, f.attempts, f.error)
                 if time.time() - last_prune > 86400:
                     log.info("pruned %d old docs", bridge.prune())
                     last_prune = time.time()

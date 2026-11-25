@@ -45,7 +45,7 @@ async def _poll(args) -> None:
 
     bridge = get_bridge()
     try:
-        print(json.dumps([asdict(d) for d in await bridge.poll_outbox()], indent=2))
+        print(json.dumps(asdict(await bridge.poll()), indent=2))
     finally:
         await bridge.aclose()
 
