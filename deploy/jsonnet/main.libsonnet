@@ -139,12 +139,11 @@
            resources: { requests: { storage: cfg.storage.size } },
          } + (if cfg.storage.storageClass == null then {} else { storageClassName: cfg.storage.storageClass }),
        }])
-    + (if !cfg.ingress.enabled then [] else [
-         ingress(cfg.name, '/', cfg.ingress.annotations),
-       ] + (if !cfg.ingress.uploads.enabled then [] else [
-         // create_upload's URLs carry a signed, expiring token and are fetched by agents' shells,
-         // which have no browser session: this path skips the auth annotations of the main one.
+    + (if !cfg.ingress.enabled then [] else [ingress(cfg.name, '/', cfg.ingress.annotations)])
+    // create_upload's URLs carry a signed, expiring token and are fetched by agents' shells,
+    // which have no browser session: this path skips the auth annotations of the main one.
+    + (if !(cfg.ingress.enabled && cfg.ingress.uploads.enabled) then [] else [
          ingress(cfg.name + '-upload', '/upload/', cfg.ingress.uploads.annotations),
-       ]))
+       ])
   ),
 }
