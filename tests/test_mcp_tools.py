@@ -62,7 +62,6 @@ async def test_create_upload(bridge, monkeypatch, tmp_path):
 
     from inkbridge import config, mcp_server, uploads
 
-    monkeypatch.setattr(uploads, "_uploads", uploads.Uploads(b"k" * 32))
     monkeypatch.setattr(mcp_server, "get_settings",
                         lambda: config.Settings(data_dir=tmp_path, public_url="https://ink.test"))
 
@@ -71,7 +70,7 @@ async def test_create_upload(bridge, monkeypatch, tmp_path):
     assert result["command"].endswith(f"-T <file> '{result['upload_url']}'")
     assert 0 < result["expires_in_s"] <= 900
     token = result["upload_url"].rsplit("/", 1)[1]
-    assert uploads.get_uploads().check(token).title == "Spec"
+    assert uploads.get_uploads().claim(token).title == "Spec"
 
     bad = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x", "kind": "docx"}))[0].text)
     assert "kind must be" in bad["error"]
@@ -96,7 +95,8 @@ def test_create_upload_url_comes_from_the_request(tmp_path, monkeypatch, headers
 
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.delenv("PUBLIC_URL", raising=False)
-    monkeypatch.setattr(uploads, "_uploads", None)
+    monkeypatch.setattr(pipeline, "_bridge", pipeline.InkBridge(
+        config.Settings(data_dir=tmp_path), SQLiteStore(":memory:"), MemoryTransport()))
     config.get_settings.cache_clear()
     from inkbridge.api import create_app
 

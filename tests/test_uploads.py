@@ -1,50 +1,91 @@
+import threading
 import time
 
 import pytest
 
 from inkbridge import uploads
-from inkbridge.uploads import UploadError, Uploads, load_key, sniff_kind
+from inkbridge.core.store import SQLiteStore
+from inkbridge.uploads import UploadError, Uploads, sniff_kind, token_hash
 
 
-def test_grant_round_trip_single_use_and_release():
-    u = Uploads(b"k" * 32)
-    token, grant = u.create("Spec", "markdown", "#ready")
-    assert u.check(token) == grant
-    claimed = u.claim(token)
-    assert claimed.title == "Spec" and claimed.kind == "markdown" and claimed.ready_selector == "#ready"
+@pytest.fixture
+def grants(tmp_path):
+    return Uploads(SQLiteStore(tmp_path / "s.db"))
+
+
+def test_grant_round_trip_single_use_and_release(grants):
+    token, grant = grants.create("Spec", "markdown", "#ready")
+    claimed = grants.claim(token)
+    assert claimed == grant
+    assert (claimed.title, claimed.kind, claimed.ready_selector) == ("Spec", "markdown", "#ready")
     with pytest.raises(UploadError) as e:
-        u.claim(token)
-    assert e.value.status == 410
-    u.release(claimed)  # a failed upload frees it again
-    assert u.claim(token) == grant
-
-
-def test_tampered_foreign_and_expired_tokens_are_refused(monkeypatch):
-    u = Uploads(b"k" * 32, ttl_s=60)
-    token, _ = u.create("Spec")
-    payload, sig = token.split(".")
-    for bad in (payload + "x." + sig, payload, "nonsense", payload + "." + sig[:-2] + "AA"):
-        with pytest.raises(UploadError) as e:
-            u.check(bad)
-        assert e.value.status == 403
+        grants.claim(token)
+    assert e.value.status == 410 and "already used" in str(e.value)
+    grants.release(claimed)  # a failed upload frees it again
+    assert grants.claim(token) == grant
+    grants.complete(grant, "rm-aaaaaa")
+    grants.release(grant)  # no effect once it pushed something
     with pytest.raises(UploadError):
-        Uploads(b"j" * 32).check(token)
+        grants.claim(token)
+
+
+def test_only_the_token_hash_is_stored(grants):
+    token, _ = grants.create("Spec")
+    [row] = grants.store._fetch("SELECT * FROM uploads")
+    assert row["token_hash"] == token_hash(token) and token not in str(row)
+
+
+def test_survives_a_restart(tmp_path):
+    token, _ = Uploads(SQLiteStore(tmp_path / "s.db")).create("Spec")
+    after_restart = Uploads(SQLiteStore(tmp_path / "s.db"))
+    assert after_restart.claim(token).title == "Spec"
+    with pytest.raises(UploadError):
+        Uploads(SQLiteStore(tmp_path / "s.db")).claim(token)
+
+
+def test_concurrent_claims_admit_one(tmp_path):
+    token, _ = Uploads(SQLiteStore(tmp_path / "s.db")).create("Spec")
+    results = []
+
+    def claim():
+        try:
+            Uploads(SQLiteStore(tmp_path / "s.db")).claim(token)
+            results.append("ok")
+        except UploadError:
+            results.append("refused")
+
+    threads = [threading.Thread(target=claim) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(results) == ["ok"] + ["refused"] * 7
+
+
+def test_unknown_and_expired_tokens_are_refused(grants, monkeypatch):
+    with pytest.raises(UploadError) as e:
+        grants.claim("nonsense")
+    assert e.value.status == 403
+    grants.ttl_s = 60
+    token, _ = grants.create("Spec")
     later = time.time() + 61
     monkeypatch.setattr(uploads.time, "time", lambda: later)
     with pytest.raises(UploadError) as e:
-        u.check(token)
-    assert e.value.status == 410
+        grants.claim(token)
+    assert e.value.status == 410 and "expired" in str(e.value)
 
 
-def test_unknown_kind_is_refused():
+def test_old_grants_are_pruned(grants, monkeypatch):
+    grants.create("Old")
+    later = time.time() + grants.ttl_s + uploads.KEEP_S + 1
+    monkeypatch.setattr(uploads.time, "time", lambda: later)
+    grants.create("New")
+    assert [r["title"] for r in grants.store._fetch("SELECT title FROM uploads")] == ["New"]
+
+
+def test_unknown_kind_is_refused(grants):
     with pytest.raises(ValueError):
-        Uploads(b"k" * 32).create("x", "docx")
-
-
-def test_key_is_created_once(tmp_path):
-    key = load_key(tmp_path / "d" / "upload.key")
-    assert len(key) == 32 and load_key(tmp_path / "d" / "upload.key") == key
-    assert (tmp_path / "d" / "upload.key").stat().st_mode & 0o777 == 0o600
+        grants.create("x", "docx")
 
 
 @pytest.mark.parametrize("data,ctype,kind,expected", [

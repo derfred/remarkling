@@ -12,7 +12,6 @@ from rmfixtures import line, rm_page, sample_pdf
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PUBLIC_URL", "https://ink.test")
-    monkeypatch.setattr(uploads, "_uploads", None)
     config.get_settings.cache_clear()
     bridge = pipeline.InkBridge(config.get_settings(), SQLiteStore(":memory:"), MemoryTransport(), FakeInterpreter())
     monkeypatch.setattr(pipeline, "_bridge", bridge)
@@ -157,6 +156,8 @@ def test_upload_pdf_once(client):
     r = client.put(url, content=sample_pdf())
     assert r.status_code == 200, r.text
     doc = client.bridge.store.get(r.json()["doc_id"])
+    [row] = client.bridge.store._fetch("SELECT * FROM uploads")
+    assert row["doc_id"] == doc.doc_id and row["claimed_at"] and url.rsplit("/", 1)[1] not in str(row)
     assert doc.title == "Spec" and doc.source_kind == "pdf" and doc.source_ref == "upload"
     assert r.json()["tablet_path"] == [f"/Inbox/Spec · {doc.doc_id}"]
     assert client.put(url, content=sample_pdf()).status_code == 410

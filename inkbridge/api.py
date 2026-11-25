@@ -4,7 +4,7 @@ The app does no authentication: whoever can reach it can use it. Access control 
 infrastructure in front of it (ingress auth, NetworkPolicy, a mesh), split by path:
   /mcp                       MCP realm (claude.ai connector)
   /api/, /push, /poll         API realm (web UI, Shortcuts, REST)
-  /upload/<token>             upload realm: the signed token is the credential (see uploads.py),
+  /upload/<token>             upload realm: the one-time token is the credential (see uploads.py),
                               so it must be reachable without the API realm's auth
   /docs, /redoc, /openapi.json the API's schema; no data
   /healthz, /, /ui/           no data; the UI's calls go to /api/
@@ -202,6 +202,7 @@ def create_app() -> FastAPI:
         except BaseException:
             uploads.release(grant)
             raise
+        uploads.complete(grant, result.doc_id)
         return {"doc_id": result.doc_id, "title": result.title, "tablet_path": result.tablet_paths,
                 "parts": result.parts}
 

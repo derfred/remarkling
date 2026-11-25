@@ -82,6 +82,21 @@ MIGRATIONS: list[str] = [
     ALTER TABLE docs ADD COLUMN location TEXT;                             -- folder on the tablet at the last check
     ALTER TABLE docs ADD COLUMN removed_at {float}                         -- trashed or deleted; no longer checked
     """,
+    # 3: upload grants (create_upload). The URL's token is a random secret; only its SHA-256 is
+    # stored. Claiming one is a conditional UPDATE, so it is single-use across containers and
+    # restarts. Rows are kept a while after they expire, as a record of what was uploaded.
+    """
+    CREATE TABLE IF NOT EXISTS uploads (
+      token_hash     TEXT PRIMARY KEY,                                     -- sha256 hex of the URL's token
+      title          TEXT NOT NULL,
+      kind           TEXT,                                                 -- pdf | html | markdown; NULL: sniffed
+      ready_selector TEXT,
+      created_at     {float} NOT NULL,
+      expires_at     {float} NOT NULL,
+      claimed_at     {float},                                              -- an upload is running or done
+      doc_id         TEXT                                                  -- the doc it pushed
+    )
+    """,
 ]
 
 # Rows per IN (...) list; far below SQLite's and Postgres's parameter limits.
@@ -145,8 +160,8 @@ class Store(ABC):
     def _fetch(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]: ...
 
     @abstractmethod
-    def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
-        """Run one write statement in its own transaction."""
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
+        """Run one write statement in its own transaction; return the number of rows it changed."""
 
     @abstractmethod
     def _execute_many(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
@@ -265,6 +280,38 @@ class Store(ABC):
         """Every entry under `prefix` as {key, value (raw JSON text), created_at}, for inspection."""
         return self._fetch("SELECT key, value, created_at FROM cache WHERE key LIKE ? ORDER BY key", (prefix + "%",))
 
+    # --- upload grants ----------------------------------------------------------------------
+
+    def upload_create(self, token_hash: str, title: str, kind: str | None, ready_selector: str | None,
+                      created_at: float, expires_at: float) -> None:
+        self._execute(
+            "INSERT INTO uploads (token_hash, title, kind, ready_selector, created_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (token_hash, title, kind, ready_selector, created_at, expires_at),
+        )
+
+    def upload_get(self, token_hash: str) -> dict[str, Any] | None:
+        rows = self._fetch("SELECT * FROM uploads WHERE token_hash = ?", (token_hash,))
+        return rows[0] if rows else None
+
+    def upload_claim(self, token_hash: str, at: float) -> bool:
+        """Mark an unexpired, unclaimed grant claimed; False if it is missing, expired or claimed."""
+        return self._execute(
+            "UPDATE uploads SET claimed_at = ? WHERE token_hash = ? AND claimed_at IS NULL AND expires_at > ?",
+            (at, token_hash, at),
+        ) == 1
+
+    def upload_release(self, token_hash: str) -> None:
+        """Unclaim a grant whose upload failed before it pushed anything."""
+        self._execute("UPDATE uploads SET claimed_at = NULL WHERE token_hash = ? AND doc_id IS NULL", (token_hash,))
+
+    def upload_done(self, token_hash: str, doc_id: str) -> None:
+        self._execute("UPDATE uploads SET doc_id = ? WHERE token_hash = ?", (doc_id, token_hash))
+
+    def upload_prune(self, before: float) -> int:
+        """Delete grants that expired before `before`."""
+        return self._execute("DELETE FROM uploads WHERE expires_at < ?", (before,))
+
     def with_rm_uuid(self) -> list[Doc]:
         return self._many("SELECT * FROM docs WHERE rm_uuid IS NOT NULL ORDER BY doc_id", ())
 
@@ -297,9 +344,9 @@ class SQLiteStore(Store):
     def _fetch(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in self._conn.execute(sql, params).fetchall()]
 
-    def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
         with self._conn:
-            self._conn.execute(sql, params)
+            return self._conn.execute(sql, params).rowcount
 
     def _execute_many(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
         with self._conn:
@@ -349,9 +396,9 @@ class PostgresStore(Store):
         sql = sql.replace("?", "%s")
         return self._run(lambda conn: conn.execute(sql, params).fetchall())
 
-    def _execute(self, sql: str, params: Sequence[Any] = ()) -> None:
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> int:
         sql = sql.replace("?", "%s")
-        self._run(lambda conn: conn.execute(sql, params))
+        return self._run(lambda conn: conn.execute(sql, params).rowcount)
 
     def _execute_many(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
         sql = sql.replace("?", "%s")

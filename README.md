@@ -51,7 +51,7 @@ inkbridge/
     pipeline.py    # push_document(), pull_document(), check_ink(); poll() = poll_outbox() + check_ink() + interpret_pending()
   mcp_server.py    # push_document, create_upload, pull_document, document_status, list_documents,
                    # remove_document, get_annotations, poll_now, list_returned, list_inbox
-  uploads.py       # signed one-time upload URLs (create_upload -> PUT /upload/<token>)
+  uploads.py       # one-time upload URLs, grants in the store (create_upload -> PUT /upload/<token>)
   api.py           # FastAPI /push /poll /healthz, /api/cache, /api/docs, /ui + MCP at /mcp (no auth of its own)
   web/             # built cache explorer UI (from web/ at the repo root; not in git)
   poller.py        # poll() on cloud websocket notifications (timer fallback)
@@ -196,8 +196,10 @@ infrastructure's job, outside this repo, so it can differ per realm and per path
 | public  | `/healthz`, `/`, `/ui/`                                   | probes; the UI's static files (no data) |
 
 Externally, put an auth proxy in front of each realm (e.g. oauth2-proxy via Ingress annotations),
-except the upload realm: its URLs carry their own credential, a token signed with a key in
-`DATA_DIR/upload.key` that expires after `UPLOAD_TTL_S` (15 min) and works for one upload. So
+except the upload realm: its URLs carry their own credential, a random token that expires after
+`UPLOAD_TTL_S` (15 min) and works for one upload. The store keeps the grant behind it (the
+`uploads` table, with the token's SHA-256 only and the doc each upload pushed) so a URL stays
+single-use across restarts and containers. So
 whatever exposes the app must let `/upload/` through without the API realm's auth (agents' shells
 have no browser session): with ingress-nginx, a separate Ingress for the `/upload/` prefix
 without the auth annotations; with oauth2-proxy, `--skip-auth-route=^/upload/`. Its body size
