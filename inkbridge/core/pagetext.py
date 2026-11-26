@@ -113,7 +113,7 @@ def layout(text: si.Text) -> TextLayout | None:
     try:
         doc = TextDocument.from_scene_item(text)
     except Exception:
-        log.exception("could not read the page's text")
+        log.exception("could not read the page text")
         return None
     if not any(str(p).strip() for p in doc.contents):
         return None

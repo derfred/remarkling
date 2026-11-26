@@ -267,7 +267,7 @@ class BlobCache:
         try:
             return fn(self.store)
         except Exception:
-            log.warning("blob cache %s failed; continuing without it", what, exc_info=True)
+            log.warning("blob cache failed; continuing without it", extra={"op": what}, exc_info=True)
             return default
 
     def prefetch(self, hashes: list[str]) -> None:
@@ -321,6 +321,8 @@ class CloudTransport:
         self._doc_cache: dict[str, tuple[Index, dict]] = {}
         # (root hash, live entries with metadata): an unchanged root needs no blob fetches at all.
         self._listing: tuple[str, list[tuple[Entry, dict]]] | None = None
+        # uuid -> (index hash, index, metadata) for every entry of the last listed root, to log what each sync changed.
+        self._seen: dict[str, tuple[str, Index, dict]] | None = None
         self.blob_fetches = 0
 
     async def aclose(self) -> None:
@@ -388,7 +390,7 @@ class CloudTransport:
                 async for raw in ws:
                     yield parse_notification(raw)
             except ConnectionClosed as e:
-                log.info("notifications websocket closed: %s", e)
+                log.info("notifications websocket closed", extra={"reason": str(e)})
 
         try:
             yield events()
@@ -472,7 +474,7 @@ class CloudTransport:
 
     async def _all_docs(self, root_hash: str, root: Index) -> list[tuple[Entry, dict]]:
         if self._listing and self._listing[0] == root_hash:
-            log.debug("root %s unchanged, reusing listing", root_hash[:12])
+            log.debug("root unchanged; reusing listing", extra={"root": root_hash})
             return self._listing[1]
         fetches = self.blob_fetches
         self._prefetch(root.entries)
@@ -480,11 +482,19 @@ class CloudTransport:
 
         async def one(e: Entry):
             async with sem:
-                _, meta = await self._doc(e)
-                return e, meta
+                index, meta = await self._doc(e)
+                return e, index, meta
 
         # Every root entry is a document or folder; v4 roots may type them "0" instead of DOC_TYPE.
-        results = await asyncio.gather(*(one(e) for e in root.entries))
+        listed = await asyncio.gather(*(one(e) for e in root.entries))
+        results = [(e, m) for e, _, m in listed]
+        seen = {e.id: (e.hash, index, m) for e, index, m in listed}
+        if self._seen is not None:
+            try:
+                await self._log_changes(self._seen, seen)
+            except Exception:
+                log.warning("could not describe the sync", extra={"root": root_hash}, exc_info=True)
+        self._seen = seen
         # Keep only the current entries so neither the memo nor the store grows with every edit.
         # A concurrent lister on a newer root may lose blobs it just cached; it refetches them.
         current = {e.hash for e in root.entries}
@@ -495,8 +505,64 @@ class CloudTransport:
         self.cache.retain(live)
         docs = [(e, m) for e, m in results if not m.get("deleted") and m.get("parent") != "trash"]
         self._listing = (root_hash, docs)
-        log.info("listed root %s: %d entries, %d blobs fetched", root_hash[:12], len(root.entries), self.blob_fetches - fetches)
+        log.info("root listed", extra={"root": root_hash, "entries": len(root.entries),
+                                       "blob_fetches": self.blob_fetches - fetches})
         return docs
+
+    async def _log_changes(self, old: dict[str, tuple[str, Index, dict]], new: dict[str, tuple[str, Index, dict]]) -> None:
+        """Log a "doc synced" event per document a new root changed: what changed, and how many
+        strokes its pages gained or lost.
+
+        Costs two blob fetches per changed page (its .rm before and after); nothing for unchanged docs.
+        """
+        old_meta = {u: m for u, (_, _, m) in old.items()}
+        new_meta = {u: m for u, (_, _, m) in new.items()}
+        for uid in sorted(old.keys() | new.keys()):
+            before, after = old.get(uid), new.get(uid)
+            if before and after and before[0] == after[0]:
+                continue
+            meta = (after or before)[2]
+            fields: dict[str, Any] = {
+                "change": "new" if before is None else "gone" if after is None else "changed",
+                "rm_uuid": uid,
+                "doc_name": meta.get("visibleName", ""),
+                "doc_type": meta.get("type", ""),
+                "location": _location(meta, new_meta if after else old_meta),
+            }
+            if before is not None and after is not None:
+                fields |= _meta_changes(before[2], after[2], _location(before[2], old_meta), fields["location"])
+                old_files = {e.id: e.hash for e in before[1].entries}
+                new_files = {e.id: e.hash for e in after[1].entries}
+                others = sorted(f.removeprefix(uid) for f in old_files.keys() | new_files.keys()
+                                if old_files.get(f) != new_files.get(f) and not f.endswith((".rm", ".metadata")))
+                if others:
+                    fields["files_changed"] = ",".join(others)
+                fields |= await self._stroke_changes(uid, ink_pages(uid, before[1]), ink_pages(uid, after[1]))
+            log.info("doc synced", extra=fields)
+
+    async def _stroke_changes(self, uid: str, old_pages: dict[str, str], new_pages: dict[str, str]) -> dict[str, Any]:
+        """strokes_added/strokes_removed over the pages whose .rm changed, and per page in `pages`."""
+        pages, added_total, removed_total = [], 0, 0
+        for page in sorted(old_pages.keys() | new_pages.keys()):
+            if old_pages.get(page) == new_pages.get(page):
+                continue
+            prev = await self._stroke_ids(uid, page, old_pages.get(page))
+            cur = await self._stroke_ids(uid, page, new_pages.get(page))
+            added, removed = len(cur - prev), len(prev - cur)
+            added_total += added
+            removed_total += removed
+            pages.append(f"{page}:+{added}/-{removed}")
+        if not pages:
+            return {}
+        return {"strokes_added": added_total, "strokes_removed": removed_total,
+                "pages_changed": len(pages), "pages": " ".join(pages)}
+
+    async def _stroke_ids(self, doc_uuid: str, page: str, h: str | None) -> set:
+        if h is None:
+            return set()
+        from .scene import stroke_ids
+
+        return await asyncio.to_thread(stroke_ids, await self.get_blob(h, f"{doc_uuid}/{page}.rm"))
 
     async def sync(self) -> dict:
         """Fill the blob cache for the current root: every index, .metadata and .content blob.
@@ -521,8 +587,8 @@ class CloudTransport:
                 await self.get_blob(f.hash, f.id)
 
         await asyncio.gather(*(one(f) for f in contents))
-        log.info("synced root %s: %d entries, %d blobs fetched", root_hash[:12], len(root.entries),
-                 self.blob_fetches - fetches)
+        log.info("blob cache synced", extra={"root": root_hash, "entries": len(root.entries), "documents": len(docs),
+                                             "blob_fetches": self.blob_fetches - fetches})
         return {"root": root_hash, "entries": len(root.entries), "documents": len(docs),
                 "fetched": self.blob_fetches - fetches}
 
@@ -539,12 +605,12 @@ class CloudTransport:
     async def _commit(self, mutate) -> None:
         """Apply `mutate(root_index) -> None` (which may upload blobs) and swap the root, retrying on conflicts."""
         async with self._lock:
-            for _ in range(5):
+            for attempt in range(1, 6):
                 _, generation, root = await self.get_root()
                 await mutate(root)
                 if await self._put_root(root, generation):
                     return
-                log.info("root changed during commit, retrying")
+                log.info("root changed during commit; retrying", extra={"attempt": attempt})
             raise CloudError("could not update root after 5 attempts")
 
     async def _folder_uuid(self, name: str, docs: list[tuple[Entry, dict]]) -> str | None:
@@ -667,6 +733,27 @@ class CloudTransport:
             root.put(Entry(h, DOC_TYPE, doc_uuid, len(index.entries), sum(e.size for e in index.entries)))
 
         await self._commit(mutate)
+
+
+def _meta_changes(old: dict, new: dict, old_location: str, new_location: str) -> dict[str, Any]:
+    """Log fields for a metadata change: renamed, moved, trashed, opened, or just touched."""
+    out: dict[str, Any] = {}
+    if old.get("visibleName") != new.get("visibleName"):
+        out["renamed_from"] = old.get("visibleName")
+    if old.get("parent") != new.get("parent"):
+        out["moved_from"] = old_location
+        out["moved_to"] = "trash" if new.get("parent") == "trash" else new_location
+    if bool(old.get("deleted")) != bool(new.get("deleted")):
+        out["deleted"] = bool(new.get("deleted"))
+    if old.get("lastOpened") != new.get("lastOpened"):
+        out["opened"] = True
+    if old.get("lastOpenedPage") != new.get("lastOpenedPage"):
+        out["page_from"] = old.get("lastOpenedPage")
+        out["page_to"] = new.get("lastOpenedPage")
+    keys = sorted(k for k in old.keys() | new.keys() if old.get(k) != new.get(k))
+    if keys:
+        out["metadata_changed"] = ",".join(keys)
+    return out
 
 
 def _location(meta: dict, by_uuid: dict[str, dict]) -> str:

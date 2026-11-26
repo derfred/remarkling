@@ -169,7 +169,7 @@ class Interpreter:
         try:
             return parse_json(reply)
         except (ValueError, json.JSONDecodeError):
-            log.warning("strip %s: unparseable reply %r", strip.index, reply[:200])
+            log.warning("unparseable interpretation reply", extra={"strip": strip.index, "reply": reply[:200]})
             return {"marks": [], "free_notes": [], "summary": ""}
 
     async def summarize(self, title: str, marks: list[dict], notes: list[str], summaries: list[str]) -> str:
