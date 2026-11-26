@@ -1,0 +1,47 @@
+name: Clean up images
+
+# Deletes old commit images (sha-<full sha>, pushed by ci.yml) from
+# ghcr.io/derfred/remarkling, using dataaxiom/ghcr-cleanup-action. It treats an
+# image as a whole: each one is an index whose platform image and attestation
+# are untagged package versions, deleted with it and kept with it.
+#
+#   - kept: releases (X.Y.Z) and latest, whatever their age. A release also
+#     carries a sha- tag; exclusion keeps the whole image, tags included.
+#   - deleted: sha-* images and untagged leftovers older than 30 days, so a
+#     commit being tried out, or a deployment overriding the image with one,
+#     keeps working for a month.
+#
+# Weekly it deletes. Run by hand it is a dry run unless dry_run is unticked:
+# the job summary lists what is kept and what would go.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List what would be deleted, delete nothing
+        type: boolean
+        default: true
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      # Third-party, with delete rights on the package: pinned to a commit (v1.3.0).
+      - uses: dataaxiom/ghcr-cleanup-action@ac45a8c04b1eb4b27974ca79a0a74f344c93664b
+        with:
+          package: remarkling
+          use-regex: true
+          delete-tags: ^sha-
+          exclude-tags: ^[0-9]+\.[0-9]+\.[0-9]+$,^latest$
+          delete-untagged: true
+          older-than: 30 days
+          validate: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
