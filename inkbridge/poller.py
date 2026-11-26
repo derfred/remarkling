@@ -13,6 +13,7 @@ import contextlib
 import logging
 import time
 
+from . import logs
 from .config import Settings, get_settings
 from .core.pipeline import InkBridge, get_bridge
 
@@ -41,22 +42,22 @@ class Listener:
             try:
                 async with self.transport.notifications() as events:
                     self.connected = True
-                    log.info("listening for reMarkable cloud notifications")
+                    log.info("notifications connected")
                     self.wake.set()  # catch up on anything synced while disconnected
                     async for event in events:
-                        log.info(
-                            "notification %s from %s",
-                            event.get("event") or "?",
-                            event.get("sourceDeviceDesc") or event.get("sourceDeviceID") or "?",
-                        )
+                        log.info("notification received", extra={
+                            "event": event.get("event"),
+                            "source_device": event.get("sourceDeviceDesc"),
+                            "source_device_id": event.get("sourceDeviceID"),
+                        })
                         self.wake.set()
-                log.info("notifications websocket closed; reconnecting")
+                log.info("notifications closed")
             except Exception as e:
-                log.warning("notifications unavailable: %s", e)
+                log.warning("notifications unavailable", extra={"error": str(e), "error_type": type(e).__name__})
             self.connected = False
             if time.monotonic() - started >= STABLE_S:
                 backoff = MIN_BACKOFF_S
-            log.info("reconnecting in %.0fs (polling meanwhile)", backoff)
+            log.info("notifications reconnecting; polling meanwhile", extra={"backoff_s": backoff})
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, MAX_BACKOFF_S)
 
@@ -68,9 +69,11 @@ async def run(bridge: InkBridge, settings: Settings, debounce_s: float = DEBOUNC
     listener = Listener(transport, wake) if transport.notifications_enabled else None
     task = asyncio.create_task(listener.run()) if listener else None
     if listener:
-        log.info("watching /%s via notifications, safety poll every %ss", settings.outbox_folder, settings.poll_fallback_s)
+        log.info("poller started", extra={"mode": "notifications", "outbox": settings.outbox_folder,
+                                          "poll_every_s": settings.poll_fallback_s})
     else:
-        log.info("polling /%s every %ss", settings.outbox_folder, settings.poll_interval_s)
+        log.info("poller started", extra={"mode": "polling", "outbox": settings.outbox_folder,
+                                          "poll_every_s": settings.poll_interval_s})
     last_prune = 0.0
     try:
         while True:
@@ -79,19 +82,32 @@ async def run(bridge: InkBridge, settings: Settings, debounce_s: float = DEBOUNC
             try:
                 await asyncio.wait_for(wake.wait(), timeout)
                 await asyncio.sleep(debounce_s)
+                trigger = "wake"
             except TimeoutError:
-                pass
+                trigger = "timer"
             wake.clear()
             try:
+                started = time.monotonic()
+                fetches = getattr(transport, "blob_fetches", 0)
                 result = await bridge.poll()
+                log.info("poll finished", extra={
+                    "trigger": trigger,
+                    "pulled": len(result.pulled),
+                    "new_ink": len(result.changed),
+                    "failed": len(result.failed),
+                    "blob_fetches": getattr(transport, "blob_fetches", 0) - fetches,
+                    "duration_s": round(time.monotonic() - started, 3),
+                })
                 for d in result.pulled:
-                    log.info("pulled %s %r: interpretation %s", d.doc_id, d.title, d.interpretation)
+                    log.info("doc pulled", extra={"doc_id": d.doc_id, "title": d.title, "interpretation": d.interpretation})
                 for c in result.changed:
-                    log.info("new ink on %s %r in %s (%d pages)", c.doc_id, c.title, c.location, c.changed_pages)
+                    log.info("new ink", extra={"doc_id": c.doc_id, "title": c.title, "location": c.location,
+                                               "changed_pages": c.changed_pages})
                 for f in result.failed:
-                    log.warning("%s %r failed at %s (attempt %d): %s", f.doc_id, f.title, f.stage, f.attempts, f.error)
+                    log.warning("doc failed", extra={"doc_id": f.doc_id, "title": f.title, "stage": f.stage,
+                                                  "attempts": f.attempts, "error": f.error})
                 if time.time() - last_prune > 86400:
-                    log.info("pruned %d old docs", bridge.prune())
+                    log.info("old docs pruned", extra={"count": bridge.prune()})
                     last_prune = time.time()
             except Exception:
                 log.exception("poll failed")
@@ -107,7 +123,7 @@ async def run_forever() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    logs.setup()
     asyncio.run(run_forever())
 
 

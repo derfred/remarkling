@@ -183,7 +183,7 @@ class Renderer:
                 try:
                     ink = parse_page(data, pdf_page or 0)
                 except Exception:  # a broken page should not lose the rest
-                    log.exception("could not parse page %s of %s", page_id, self.doc.uuid)
+                    log.exception("could not parse page", extra={"page_id": page_id, "rm_uuid": self.doc.uuid})
             text = pagetext.layout(ink.text) if ink.text is not None else None
             _anchor(ink, text)
             if pdf_page is not None:

@@ -158,3 +158,22 @@ def parse_page(rm_bytes: bytes, pdf_page: int = 0) -> PageInk:
                 rects=[(r.x + dx, r.y, r.w, r.h) for r in item.rectangles],
             ))
     return ink
+
+
+def stroke_ids(rm_bytes: bytes) -> set[CrdtId]:
+    """The IDs of every pen stroke on a page, hidden layers included and eraser strokes excluded.
+
+    Stroke IDs are stable across syncs, so comparing two versions of a page tells added strokes
+    from removed (erased, undone) ones.
+    """
+    ids: set[CrdtId] = set()
+
+    def walk(group: si.Group) -> None:
+        for item_id, item in group.children.items():
+            if isinstance(item, si.Group):
+                walk(item)
+            elif isinstance(item, si.Line) and item.tool not in ERASERS:
+                ids.add(item_id)
+
+    walk(read_tree(io.BytesIO(rm_bytes)).root)
+    return ids
