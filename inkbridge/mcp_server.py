@@ -26,17 +26,29 @@ mcp = MCPServer(
         "all there is (a paper, a scan, a file the user gave you).\n\n"
         "Sending (each way returns a doc_id; keep it, every later call needs it):\n"
         "- Text you wrote: push_document(markdown=...).\n"
-        "- A Claude Docs doc: not through your artifact tools (they return its viewer, not its content). "
-        "Export the tab with the docs export tool as markdown (not html, which comes unstyled; not pdf), "
-        "decode it and pass the text to push_document(markdown=...); use create_upload only if the export "
-        "was saved to a file.\n"
+        "- A Claude Docs doc (a claude.ai/artifact link can be one: your artifact tools say so): not "
+        "through your artifact tools (they return its viewer, not its content), and not the docs read "
+        "tool (it returns fragment XML, several times larger than the text). Export the tab with the "
+        "docs export tool as markdown (not html, which comes unstyled; not pdf); its bytes_b64 is the "
+        "markdown in base64. A result with saved_to instead of bytes_b64: your client already wrote the "
+        "decoded file there; send that path with create_upload(title, \"markdown\") and decode nothing. "
+        "In your context: decode it yourself as you write the text into "
+        "push_document(markdown=...). No tool decodes it for you without you typing the base64 out "
+        "first, which costs a third more than the text, and one wrong character corrupts it. Saved to a "
+        "file by your client instead: decode it there in a shell (bytes_b64 of the JSON, base64 -d) and "
+        "send that file with create_upload(title, \"markdown\"), never through your context.\n"
         "- Another artifact: its HTML (CSS and assets inlined), or its markdown.\n"
-        "- A file on disk, or content over ~50 KB: with a shell, create_upload(title, kind) and run the "
-        "curl command it returns, with <file> replaced by the path; the doc_id is in curl's output. "
-        "Without a shell, or if the URL is unreachable from it, pass markdown or HTML to push_document.\n\n"
+        "- A file on disk (one the user gave you, or a result your client saved to a file): with a shell, "
+        "create_upload(title, kind) and run the curl command it returns, with <file> replaced by the path; "
+        "the doc_id is in curl's output. Without a shell, or if the URL is unreachable from it, pass "
+        "markdown or HTML to push_document. create_upload saves context only when the bytes are already "
+        "on disk: content already in your context goes to push_document; over ~50 KB, write the text you "
+        "would have passed to a file and upload that.\n\n"
         "Getting annotations back: when the user says they are done, pull_document(doc_id). It fetches "
-        "from the tablet, wherever the doc is, and returns the page strips as images, plus interpreted "
-        "marks once interpretation is done; otherwise read the marks from the images yourself. "
+        "from the tablet, wherever the doc is, and returns only the stretches of page that hold ink, as "
+        "image strips. Interpretation into marks starts after the pull, so its result usually says "
+        "\"pending\": read the marks from the strips yourself, and say where each one is by quoting the "
+        "printed text it is written on or beside. Call get_annotations later for the server's marks. "
         "get_annotations returns what was last pulled without contacting the tablet. document_status "
         "and list_documents show whether a doc has new ink, without pulling.\n\n"
         "poll_now, list_returned and list_inbox serve the Outbox flow, which needs no conversation; you "
@@ -123,7 +135,8 @@ def request_base_url(request) -> str:
 
 @mcp.tool()
 async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selector: str | None = None) -> dict:
-    """A one-time URL to send a file from a shell, so its bytes never pass through your context.
+    """A one-time URL to send a file already on disk from a shell, so its bytes never pass through your
+    context. For content you already hold (an export, text you wrote), use push_document.
 
     kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
     or "pdf" (the default; keeps its pages, for files that only exist as PDF). ready_selector (HTML)
@@ -194,7 +207,8 @@ async def pull_document(doc_id: str, force: bool = False) -> list:
 
     The doc stays where it is. If its ink has not changed since the last pull, nothing is fetched
     ("new": false); force=True pulls anyway. Interpretation into marks starts afterwards in the
-    background; call get_annotations later for the marks, or read the strips yourself.
+    background, so it is usually "pending" here: read the strips yourself, placing each mark by the
+    printed text it sits on or beside, and call get_annotations later for the marks.
     """
     bridge = get_bridge()
     try:
