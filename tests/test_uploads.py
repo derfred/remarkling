@@ -97,7 +97,9 @@ def test_upload_content():
     assert upload_content(b"%PDF-1.7 ...", "pdf") == {"pdf": b"%PDF-1.7 ..."}
     assert upload_content("# Tïtle".encode(), "markdown") == {"markdown": "# Tïtle"}
     assert upload_content(b"\xef\xbb\xbf<p>x</p>", "html") == {"html": "<p>x</p>"}  # BOM dropped
-    for data, kind in ((b"# not a pdf", "pdf"), (b"\xff\xfe\x00", "markdown"), (b"%PDF-\xff", "html")):
+    assert upload_content(b"PK\x03\x04...", "rmdoc") == {"rmdoc": b"PK\x03\x04..."}
+    for data, kind in ((b"# not a pdf", "pdf"), (b"\xff\xfe\x00", "markdown"), (b"%PDF-\xff", "html"),
+                       (b"%PDF-1.7", "rmdoc")):
         with pytest.raises(UploadError) as e:
             upload_content(data, kind)
         assert e.value.status == 415

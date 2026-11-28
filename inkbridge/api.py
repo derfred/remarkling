@@ -159,7 +159,9 @@ def create_app() -> FastAPI:
             suffix = PurePath(file.filename or "").suffix.lower()
             ctype = (file.content_type or "").split(";")[0]
             name = title or PurePath(file.filename or "").stem or None
-            if ctype == "application/pdf" or suffix == ".pdf" or data[:5] == b"%PDF-":
+            if suffix == ".rmdoc":
+                result = await bridge.push_document(title, rmdoc=data, source_ref=file.filename)
+            elif ctype == "application/pdf" or suffix == ".pdf" or data[:5] == b"%PDF-":
                 result = await bridge.push_document(name, pdf=data, source_ref=file.filename)
             elif ctype == "text/html" or suffix in HTML_SUFFIXES:
                 result = await bridge.push_document(name, html=data.decode(), source_ref=file.filename)
@@ -171,7 +173,7 @@ def create_app() -> FastAPI:
 
     @app.api_route("/upload/{token}", methods=["PUT", "POST"])
     async def upload(token: str, request: Request):
-        """The body of a create_upload URL: a PDF, HTML or Markdown file, e.g. `curl -T spec.pdf <url>`."""
+        """The body of a create_upload URL: a PDF, HTML, Markdown or .rmdoc file, e.g. `curl -T spec.pdf <url>`."""
         uploads = get_uploads()
         try:
             grant = uploads.claim(token)
@@ -188,7 +190,7 @@ def create_app() -> FastAPI:
                 raise UploadError(400, "empty upload")
             content = upload_content(bytes(body), grant.kind)
             result = await get_bridge().push_document(
-                grant.title, **content, ready_selector=grant.ready_selector if grant.kind != "pdf" else None,
+                grant.title, **content, ready_selector=grant.ready_selector if grant.kind in ("html", "markdown") else None,
                 source_ref="upload",
             )
         except UploadError as e:

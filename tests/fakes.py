@@ -51,6 +51,13 @@ class MemoryTransport:
         self.docs[u] = (RemoteDoc(u, visible_name, folder, version="v1"), doc)
         return u
 
+    async def upload_rmdoc(self, rmdoc, visible_name, folder):
+        u = str(uuid4())
+        doc = rmdoc.renamed(u)
+        doc.files[f"{u}.metadata"] = json.dumps({**rmdoc.metadata, "visibleName": visible_name}).encode()
+        self.docs[u] = (RemoteDoc(u, visible_name, folder, version="v1"), doc)
+        return u
+
     async def download(self, remote):
         if remote.uuid not in self.docs:
             raise FileNotFoundError(remote.uuid)

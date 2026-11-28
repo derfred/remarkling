@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import zipfile
@@ -50,6 +51,22 @@ class RmDoc:
     def rm_file(self, page_id: str) -> bytes | None:
         return self.files.get(f"{self.uuid}/{page_id}.rm")
 
+    def renamed(self, uuid: str) -> "RmDoc":
+        """The same document under another UUID: every file moved to the new name."""
+        def rename(name: str) -> str:
+            for old, new in ((self.uuid + "/", uuid + "/"), (self.uuid + ".", uuid + ".")):
+                if name.startswith(old):
+                    return new + name[len(old):]
+            return name
+
+        return RmDoc(uuid=uuid, files={rename(n): b for n, b in self.files.items()})
+
+    def ink_pages(self) -> dict[str, str]:
+        """Page ID -> SHA-256 of the page's strokes file, as the cloud index reports it."""
+        prefix = self.uuid + "/"
+        return {n[len(prefix):-3]: hashlib.sha256(b).hexdigest()
+                for n, b in self.files.items() if n.startswith(prefix) and n.endswith(".rm")}
+
     def to_zip(self) -> bytes:
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
@@ -59,8 +76,11 @@ class RmDoc:
 
     @classmethod
     def from_zip(cls, data: bytes) -> "RmDoc":
-        with zipfile.ZipFile(io.BytesIO(data)) as z:
-            files = {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                files = {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
+        except zipfile.BadZipFile as e:
+            raise ValueError("not an .rmdoc: not a zip archive") from e
         meta = next((n for n in files if n.endswith(".metadata") and "/" not in n), None)
         if meta is None:
             raise ValueError("not an .rmdoc: no .metadata file")

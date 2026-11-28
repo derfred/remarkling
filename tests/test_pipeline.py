@@ -370,3 +370,43 @@ async def test_interpretation_result_is_dropped_if_the_doc_was_pulled_again(brid
     await bridge._interpret(doc)
     assert bridge.store.get(pushed.doc_id).interpret_status == "pending"
     await bridge.drain()
+
+
+async def test_push_rmdoc_keeps_pages_and_ink_as_the_baseline(bridge):
+    from rmfixtures import notebook
+
+    t = bridge.transport
+    source = notebook([rm_page([line([(0, 300), (10, 310)])]), None])
+    result = await bridge.push_document("", rmdoc=source.to_zip(), source_ref="notes.rmdoc")
+    assert result.title == "Notes" and result.tablet_paths == [f"/Inbox/Notes · {result.doc_id}"]
+    doc = bridge.store.get(result.doc_id)
+    assert doc.source_kind == "rmdoc" and doc.status == "pushed" and doc.rm_uuid != source.uuid
+    assert (doc.path / "original.pdf").exists() and (doc.path / "pushed.rmdoc").exists()
+
+    _, on_tablet = t.docs[doc.rm_uuid]
+    assert on_tablet.page_ids() == source.page_ids()
+    assert on_tablet.rm_file(source.page_ids()[0]) == source.rm_file(source.page_ids()[0])
+    [status] = await bridge.document_status(result.doc_id)
+    assert status["has_new_ink"] is False  # the ink it came with is not new
+
+    t.annotate(doc.rm_uuid, rm_page([line([(0, 300), (10, 310)]), line([(50, 400), (90, 420)])]), move_to=None)
+    [status] = await bridge.document_status(result.doc_id)
+    assert status["has_new_ink"] is True and status["changed_pages"] == [1]
+    [pulled] = await bridge.pull_document(result.doc_id)
+    assert pulled.doc_id == result.doc_id and bridge.store.get(result.doc_id).status == "pulled"
+
+
+async def test_pushed_rmdoc_is_not_mistaken_for_the_doc_it_was_exported_from(bridge):
+    t = bridge.transport
+    first = await bridge.push_document("Spec", pdf=sample_pdf())
+    exported = t.docs[bridge.store.get(first.doc_id).rm_uuid][1]  # its PDF carries first.doc_id
+    copy = await bridge.push_document("Spec again", rmdoc=exported.to_zip())
+    t.annotate(bridge.store.get(copy.doc_id).rm_uuid, rm_page([line([(-200, 300), (200, 320)])]), move_to=None)
+    [pulled] = await bridge.pull_document(copy.doc_id)
+    assert pulled.doc_id == copy.doc_id
+    assert bridge.store.get(first.doc_id).status == "pushed"
+
+
+async def test_push_rmdoc_refuses_other_files(bridge):
+    with pytest.raises(ValueError, match="not a zip"):
+        await bridge.push_document("x", rmdoc=b"%PDF-1.7")

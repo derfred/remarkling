@@ -182,6 +182,21 @@ def test_upload_markdown_and_html(client, monkeypatch):
     assert calls[1] == ("Spec", {"html": "<p>x</p>", "ready_selector": "#done", "source_ref": "upload"})
 
 
+def test_upload_and_push_rmdoc(client):
+    from rmfixtures import notebook
+
+    source = notebook([rm_page([line([(0, 300), (10, 310)])])])
+    r = client.put(_upload_url(kind="rmdoc"), content=source.to_zip())
+    assert r.status_code == 200, r.text
+    doc = client.bridge.store.get(r.json()["doc_id"])
+    assert doc.title == "Spec" and doc.source_kind == "rmdoc"
+    assert client.put(_upload_url(kind="rmdoc"), content=sample_pdf()).status_code == 415
+
+    r = client.post("/push", files={"file": ("notes.rmdoc", source.to_zip(), "application/octet-stream")})
+    assert r.status_code == 200, r.text
+    assert r.json()["title"] == "Notes"  # the document's own name
+
+
 def test_failed_upload_can_be_retried(client, monkeypatch):
     url = _upload_url()
     assert client.put(url, content=b"\x00\x01").status_code == 415

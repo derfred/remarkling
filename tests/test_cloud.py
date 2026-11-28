@@ -107,6 +107,24 @@ async def test_upload_list_download_move(cloud):
     assert len(folders) == 3  # Inbox, Outbox, the document
 
 
+async def test_upload_rmdoc_as_a_new_document(cloud):
+    from rmfixtures import line, rm_page, rmdoc
+
+    fake, t = cloud
+    source = rmdoc(sample_pdf(), [rm_page([line([(0, 300), (10, 310)])])], name="Old name", parent="elsewhere")
+    source.files[f"{source.uuid}.local"] = b"{}"
+    u = await t.upload_rmdoc(source, "Spec · rm-abcdef", "Inbox")
+    assert u != source.uuid
+    [remote] = await t.list_folder("Inbox")
+    assert (remote.uuid, remote.name) == (u, "Spec · rm-abcdef")
+    assert remote.pages == source.ink_pages()  # the cloud reports the same strokes hashes
+    doc = await t.download(remote)
+    assert doc.pdf == source.pdf and doc.content == source.content
+    assert doc.rm_file(source.page_ids()[0]) == source.rm_file(source.page_ids()[0])
+    assert doc.metadata["type"] == "DocumentType" and doc.metadata["parent"] != "elsewhere"
+    assert f"{u}.local" not in doc.files
+
+
 async def test_user_token_refreshes_on_401(cloud):
     fake, t = cloud
     calls = {"n": 0}
