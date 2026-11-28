@@ -91,6 +91,7 @@ async def push_document(
     pdf_base64: str | None = None,
     url: str | None = None,
     ready_selector: str | None = None,
+    as_ink: bool = False,
 ) -> dict:
     """Upload content to /Inbox on the tablet. Returns doc_id (keep it), tablet path and parts.
 
@@ -100,6 +101,9 @@ async def push_document(
     keeps its own pages, so pass one only when no source exists, and only a small one: every byte
     goes through your context. Files and anything over ~50 KB go through create_upload.
     ready_selector (HTML, url) waits for a CSS selector before rendering: JS-drawn charts, Mermaid.
+    as_ink (experimental, only when the user asks for it): the rendered pages arrive as pen strokes
+    on a notebook instead of a PDF, so the text can be erased and moved on the tablet. Images are
+    left out. Pulls work as usual and show only the user's own ink.
     """
     result = await get_bridge().push_document(
         title,
@@ -109,6 +113,7 @@ async def push_document(
         url=url,
         ready_selector=ready_selector,
         source_kind="artifact" if html else None,
+        as_ink=as_ink,
     )
     return {"doc_id": result.doc_id, "tablet_path": result.tablet_paths, "parts": result.parts}
 

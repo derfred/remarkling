@@ -19,6 +19,7 @@ dependencies = [
   "rmscene==0.8.0",
   "uvicorn[standard]>=0.29",
   "websockets>=13",  # cloud notifications (the poller); also pulled in by uvicorn[standard]
+  "hershey-fonts>=2.1",
 ]
 
 [dependency-groups]

@@ -137,8 +137,10 @@ def _anchor(ink: PageInk, text: pagetext.TextLayout | None) -> None:
 class Renderer:
     """Renders an RmDoc. `mode` and `rm_width` place ink on PDF pages as in `Mapping`."""
 
-    def __init__(self, doc: RmDoc, rm_width: float = RM_WIDTH, mode: str = "auto"):
+    def __init__(self, doc: RmDoc, rm_width: float = RM_WIDTH, mode: str = "auto",
+                 skip: dict[str, set] | None = None):
         self.doc, self.rm_width, self.mode = doc, rm_width, mode
+        self.skip = skip or {}  # page ID -> stroke IDs to leave out (a print's)
         self._pdf_bytes = doc.pdf
         self._pdf_sizes: list[tuple[float, float]] = []
         if self._pdf_bytes:
@@ -181,7 +183,7 @@ class Renderer:
             data = self.doc.rm_file(page_id) if page_id else None
             if data:
                 try:
-                    ink = parse_page(data, pdf_page or 0)
+                    ink = parse_page(data, pdf_page or 0, self.skip.get(page_id, frozenset()))
                 except Exception:  # a broken page should not lose the rest
                     log.exception("could not parse page", extra={"page_id": page_id, "rm_uuid": self.doc.uuid})
             text = pagetext.layout(ink.text) if ink.text is not None else None
