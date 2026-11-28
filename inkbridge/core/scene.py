@@ -116,29 +116,30 @@ def _visible(group: si.Group) -> bool:
     return group.visible is None or group.visible.value is not False
 
 
-def _walk(item, dx: float = 0.0, anchor: CrdtId | None = None):
-    """Yield (leaf item, x offset, anchor) for visible items, honouring group anchors."""
+def _walk(item, dx: float = 0.0, anchor: CrdtId | None = None, item_id: CrdtId | None = None):
+    """Yield (leaf item, x offset, anchor, item ID) for visible items, honouring group anchors."""
     if isinstance(item, si.Group):
         if not _visible(item):
             return
         ox = dx + (item.anchor_origin_x.value if item.anchor_origin_x is not None else 0.0)
         if item.anchor_id is not None and item.anchor_id.value not in SPECIAL_ANCHORS:
             anchor = item.anchor_id.value
-        for child in item.children.values():
-            yield from _walk(child, ox, anchor)
+        for child_id, child in item.children.items():
+            yield from _walk(child, ox, anchor, child_id)
     else:
-        yield item, dx, anchor
+        yield item, dx, anchor, item_id
 
 
-def parse_page(rm_bytes: bytes, pdf_page: int = 0) -> PageInk:
+def parse_page(rm_bytes: bytes, pdf_page: int = 0, skip: set[CrdtId] | frozenset = frozenset()) -> PageInk:
+    """A page's visible marks; strokes whose IDs are in `skip` (a print's, see inkprint) are left out."""
     ink = PageInk(pdf_page)
     tree = read_tree(io.BytesIO(rm_bytes))
     text = tree.root_text
     if text is not None and any(isinstance(v, str) and v.strip() for v in text.items.values()):
         ink.text = text
-    for item, dx, anchor in _walk(tree.root):
+    for item, dx, anchor, item_id in _walk(tree.root):
         if isinstance(item, si.Line):
-            if item.tool in ERASERS or not item.points:
+            if item.tool in ERASERS or not item.points or item_id in skip:
                 continue
             ink.strokes.append(Stroke(
                 samples=[Sample(p.x + dx, p.y, p.speed, p.direction, p.width, p.pressure) for p in item.points],

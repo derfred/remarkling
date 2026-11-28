@@ -21,7 +21,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ..config import Settings, get_settings
-from . import render
+from rmscene.tagged_block_common import CrdtId
+
+from . import inkprint, render
 from .interpret import Interpreter, slice_strips
 from .overlay import overlay
 from .store import Doc, Store, now, open_store
@@ -114,6 +116,9 @@ def has_new_ink(doc: Doc) -> bool:
 def changed_page_ids(doc: Doc) -> list[str]:
     pulled = doc.ink_pulled or {}
     return [p for p, h in (doc.ink_seen or {}).items() if pulled.get(p) != h]
+
+
+PRINT_RECORD = "print.json"  # a doc pushed as ink: page ID -> the printed strokes' IDs
 
 
 class NotOnTablet(LookupError):
@@ -225,6 +230,7 @@ class InkBridge:
         url: str | None = None,
         rmdoc: bytes | None = None,
         ready_selector: str | None = None,
+        as_ink: bool = False,
         source_kind: str | None = None,
         source_ref: str | None = None,
     ) -> PushResult:
@@ -249,13 +255,21 @@ class InkBridge:
         paths = []
         for part in parts:
             name = render.tablet_title(title, part.doc_id, part.part, part.parts)
-            rm_uuid = await self.transport.upload_pdf(part.pdf, name, self.settings.inbox_folder)
             d = self.doc_dir(part.doc_id)
+            ink = None
+            if as_ink:
+                # Printed as strokes on a notebook; print.json tells them from the reader's ink later.
+                printed = inkprint.pdf_to_rmdoc(part.pdf, name, self.settings.rm_page_width_units)
+                rm_uuid = await self.transport.upload_rmdoc(printed, name, self.settings.inbox_folder)
+                render.write(d / PRINT_RECORD, json.dumps(inkprint.printed_strokes(printed)).encode())
+                ink = printed.ink_pages()
+            else:
+                rm_uuid = await self.transport.upload_pdf(part.pdf, name, self.settings.inbox_folder)
             render.write(d / "original.pdf", part.pdf)
             self.store.upsert(Doc(
                 doc_id=part.doc_id, base_id=base_id, title=title,
                 source_kind=source_kind or kind, source_ref=source_ref or url,
-                rm_uuid=rm_uuid, status="pushed", pushed_at=now(), dir=str(d),
+                rm_uuid=rm_uuid, status="pushed", pushed_at=now(), dir=str(d), ink_seen=ink, ink_pulled=ink,
             ))
             paths.append(f"/{self.settings.inbox_folder}/{name}")
         return PushResult(base_id, title, paths, [p.doc_id for p in parts])
@@ -345,15 +359,16 @@ class InkBridge:
         try:
             rmdoc = await self.transport.download(remote)
             stage = "render"
-            ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units)
+            view, printed = self._unprint(rmdoc, self.doc_dir(known.doc_id) if known else None)
+            ov = overlay(view, rm_width=self.settings.rm_page_width_units, **printed)
             # Notebooks (and EPUBs) have no PDF: their "original" is the rendering without ink,
             # i.e. the template and any typed text.
-            original = rmdoc.pdf or ov.text_pdf
-            if rmdoc.pdf is None:
+            original = view.pdf or ov.text_pdf
+            if view.pdf is None:
                 log.info("no PDF; using the rendered pages", extra={
                     "doc_name": remote.name, "rm_uuid": remote.uuid, "file_type": rmdoc.content.get("fileType") or "notebook"})
             strips = slice_strips(ov, original)
-            doc = self._identify(remote, rmdoc, known)
+            doc = self._identify(remote, view, known)
             stage = "save"
             d = self.doc_dir(doc.doc_id)
             # The raw document, strokes included: what interpretation (and any later model) reads.
@@ -410,6 +425,17 @@ class InkBridge:
                 log.exception("archive failed; the next poll retries", extra={"doc_name": remote.name, "rm_uuid": remote.uuid})
         return _pulled(doc)
 
+    @staticmethod
+    def _unprint(rmdoc: RmDoc, d: Path | None) -> tuple[RmDoc, dict[str, Any]]:
+        """A doc pushed as ink (see inkprint), as a pull reads it: its source PDF as the background
+        and the printed strokes left out, so only the reader's ink counts. Others as they are."""
+        record = d / PRINT_RECORD if d else None
+        if record is None or not record.exists() or not (d / "original.pdf").exists():
+            return rmdoc, {}
+        skip = {pid: {CrdtId(a, b) for a, b in ids} for pid, ids in json.loads(record.read_text()).items()}
+        # The print used the width mapping: the PDF width spans the page.
+        return inkprint.unprinted(rmdoc, (d / "original.pdf").read_bytes()), {"skip": skip, "mode": "width"}
+
     def _get(self, doc_id: str | None) -> Doc | None:
         return self.store.get(doc_id) if doc_id else None
 
@@ -464,8 +490,8 @@ class InkBridge:
     async def _interpret(self, doc: Doc) -> None:
         d = doc.path
         try:
-            rmdoc = RmDoc.from_zip((d / "ink.rmdoc").read_bytes())
-            ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units)
+            rmdoc, printed = self._unprint(RmDoc.from_zip((d / "ink.rmdoc").read_bytes()), d)
+            ov = overlay(rmdoc, rm_width=self.settings.rm_page_width_units, **printed)
             original = (d / "original.pdf").read_bytes()
             interpreted = await self.interpreter.interpret(ov, original, doc.title)
         except Exception as e:

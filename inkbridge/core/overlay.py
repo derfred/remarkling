@@ -51,8 +51,9 @@ def _merge(bands: list[tuple[int, int]], gap: int = 0) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out]
 
 
-def overlay(doc: RmDoc, mode: str = "auto", rm_width: float = RM_WIDTH) -> OverlayResult:
-    renderer = Renderer(doc, rm_width, mode)
+def overlay(doc: RmDoc, mode: str = "auto", rm_width: float = RM_WIDTH, skip: dict[str, set] | None = None
+            ) -> OverlayResult:
+    renderer = Renderer(doc, rm_width, mode, skip)
     if not renderer.pages:
         raise ValueError(f"{doc.uuid} has no pages")
     pdf, extents = renderer.render(ink=True)

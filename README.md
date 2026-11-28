@@ -356,7 +356,24 @@ An `rmdoc` is a tablet document as the desktop app or `/api/docs/{uuid}/rmdoc` e
 to `/Inbox` unchanged, a notebook's pages and any ink included, as a new copy with its own UUID (an
 empty title keeps the document's name). The ink it arrives with is the baseline: `has_new_ink`
 and `changed_pages` count only strokes added afterwards, though a pull renders all of its ink.
-`POST /push` takes an `.rmdoc` file too. The URL is good
+`POST /push` takes an `.rmdoc` file too.
+
+### Printing as ink (experimental)
+
+`push_document(..., as_ink=True)` (CLI: `inkbridge push --ink`) sends the rendered pages as pen
+strokes on a notebook instead of a PDF: a printer driver for the tablet (`core/inkprint.py`). Text
+is redrawn in a single-line Hershey font, each character fitted to the box the PDF gives it, so
+Chromium's layout (tables, code, headings) is kept; rules, borders and outlines become strokes,
+small dark fills are hatched, light backgrounds outlined in gray. Images are left out. The strokes
+go on a bottom layer "Print", under an empty "Notes" layer; hide "Print" on the tablet to see only
+your own notes.
+
+The push keeps `print.json` (each page's printed stroke IDs) with the doc. A pull drops those
+strokes and puts the source PDF back as the page background, so strips, highlights and
+interpretation see only the reader's ink, exactly as for a PDF doc.
+
+`inkbridge print spec.md -o spec.rmdoc [--font plotter|script|serif|italic]` converts locally
+without a tablet, for a look in the desktop app. The URL is good
 for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
 with it.
 

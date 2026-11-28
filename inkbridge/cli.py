@@ -1,4 +1,4 @@
-"""Command line: inkbridge push | pull | status | docs | poll | inbox | register | serve | poller."""
+"""Command line: inkbridge push | print | pull | status | docs | poll | inbox | register | serve | poller."""
 
 from __future__ import annotations
 
@@ -21,23 +21,48 @@ async def _push(args) -> None:
     bridge = get_bridge()
     try:
         if args.source.startswith(("http://", "https://")):
-            result = await bridge.push_document(args.title, url=args.source, ready_selector=args.ready_selector)
+            result = await bridge.push_document(args.title, url=args.source, ready_selector=args.ready_selector,
+                                                as_ink=args.ink)
         else:
             path = Path(args.source)
             data = path.read_bytes()
             title = args.title or path.stem
             suffix = path.suffix.lower()
             if suffix == ".pdf":
-                result = await bridge.push_document(title, pdf=data, source_ref=str(path))
+                result = await bridge.push_document(title, pdf=data, source_ref=str(path), as_ink=args.ink)
+            elif suffix == ".rmdoc":
+                result = await bridge.push_document(args.title, rmdoc=data, source_ref=str(path))
             elif suffix in (".md", ".markdown", ".txt"):
-                result = await bridge.push_document(title, markdown=data.decode(), source_ref=str(path))
+                result = await bridge.push_document(title, markdown=data.decode(), source_ref=str(path),
+                                                    as_ink=args.ink)
             else:
                 result = await bridge.push_document(
-                    title, html=data.decode(), ready_selector=args.ready_selector, source_ref=str(path)
+                    title, html=data.decode(), ready_selector=args.ready_selector, source_ref=str(path),
+                    as_ink=args.ink,
                 )
         print(json.dumps(asdict(result), indent=2))
     finally:
         await bridge.aclose()
+
+
+async def _print(args) -> None:
+    """Convert a file to a notebook of strokes (.rmdoc), locally: no tablet, nothing tracked."""
+    from .core import inkprint, render
+
+    path = Path(args.source)
+    title = args.title or path.stem
+    data = path.read_bytes()
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        pdfs = [data]
+    else:
+        html = render.markdown_to_html(data.decode(), title) if suffix in (".md", ".markdown", ".txt") else data.decode()
+        pdfs = [p.pdf for p in await render.render_tall_pdfs("rm-print", title, html=html)]
+    out = Path(args.output or path.with_suffix(".rmdoc"))
+    for i, pdf in enumerate(pdfs):
+        target = out if len(pdfs) == 1 else out.with_stem(f"{out.stem} ({i + 1})")
+        target.write_bytes(inkprint.pdf_to_rmdoc(pdf, title, font=args.font).to_zip())
+        print(target)
 
 
 async def _poll(args) -> None:
@@ -101,7 +126,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("source", help="HTML, Markdown or PDF file, or an http(s) URL")
     p.add_argument("--title")
     p.add_argument("--ready-selector")
+    p.add_argument("--ink", action="store_true", help="print as pen strokes on a notebook (experimental)")
     p.set_defaults(func=_push)
+
+    p = sub.add_parser("print", help="convert Markdown, HTML or PDF to a notebook of pen strokes (.rmdoc)")
+    p.add_argument("source")
+    p.add_argument("-o", "--output")
+    p.add_argument("--title")
+    p.add_argument("--font", default="plotter", help="plotter, script, serif, italic, or a Hershey font name")
+    p.set_defaults(func=_print)
 
     p = sub.add_parser("pull", help="fetch a pushed doc's annotations from wherever it is on the tablet")
     p.add_argument("doc_id")
