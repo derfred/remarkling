@@ -16,7 +16,7 @@ from inkbridge.core.cloud import (
     sha256,
 )
 from inkbridge.core.store import SQLiteStore
-from rmfixtures import sample_pdf
+from rmfixtures import line, rm_page, sample_pdf
 
 
 def test_crc32c_known_vector():
@@ -340,3 +340,53 @@ async def test_inspect_reports_ink_location_and_trash(cloud):
     await t.trash(u)
     assert await t.inspect([u]) == {}
     assert await t.list_folder("Outbox") == []
+
+
+def _ink(fake, u, pages: dict[str, bytes]):
+    """Set the doc's .rm files to `pages` in a new root, as a tablet sync does."""
+    root = Index.parse(fake.blobs[fake.root])
+    entry = root.get(u)
+    index = Index.parse(fake.blobs[entry.hash])
+    index.entries = [e for e in index.entries if not e.id.endswith(".rm")]
+    for page, rm in pages.items():
+        fake.blobs[sha256(rm)] = rm
+        index.put(Entry(sha256(rm), "0", f"{u}/{page}.rm", 0, len(rm)))
+    data = index.serialize(u)
+    h = index.hash(data)
+    fake.blobs[h] = data
+    root.put(Entry(h, entry.type, u, len(index.entries), 0))
+    data = root.serialize(".")
+    fake.root = sha256(data)
+    fake.blobs[fake.root] = data
+
+
+async def test_logs_changed_documents_with_stroke_counts(cloud, caplog):
+    fake, t = cloud
+    u = await t.upload_pdf(sample_pdf(), "Spec", "Inbox")
+    strokes = [line([(0, i), (10, i)]) for i in range(4)]
+    await t.inspect([u])  # the baseline: nothing is logged for the first listing
+    caplog.set_level("INFO", logger="inkbridge.core.cloud")
+
+    _ink(fake, u, {"page-1": rm_page(strokes[:3])})
+    await t.inspect([u])
+    _ink(fake, u, {"page-1": rm_page(strokes[:2]), "page-2": rm_page(strokes[:1])})
+    await t.inspect([u])
+    await t.inspect([u])  # unchanged root: nothing to log
+    await t.move((await t.inspect([u]))[u], "Outbox")
+    await t.inspect([u])
+
+    synced = [{k: v for k, v in vars(r).items() if k in DOC_FIELDS} for r in caplog.records if r.msg == "doc synced"]
+    assert synced[0] == {"change": "changed", "rm_uuid": u, "doc_name": "Spec", "location": "/Inbox",
+                         "strokes_added": 3, "strokes_removed": 0, "pages_changed": 1, "pages": "page-1:+3/-0"}
+    assert synced[1] == {"change": "changed", "rm_uuid": u, "doc_name": "Spec", "location": "/Inbox",
+                         "strokes_added": 1, "strokes_removed": 1, "pages_changed": 2,
+                         "pages": "page-1:+0/-1 page-2:+1/-0"}
+    moved = next(c for c in synced[2:] if c["rm_uuid"] == u)
+    assert moved == {"change": "changed", "rm_uuid": u, "doc_name": "Spec", "location": "/Outbox",
+                     "moved_from": "/Inbox", "moved_to": "/Outbox"}
+    assert any(c["change"] == "new" and c["doc_name"] == "Outbox" for c in synced[2:])
+    assert len(synced) == 4
+
+
+DOC_FIELDS = {"change", "rm_uuid", "doc_name", "location", "strokes_added", "strokes_removed", "pages_changed",
+              "pages", "moved_from", "moved_to"}

@@ -89,6 +89,26 @@ Every sync, including the tablet's, sends a message there, and each message trig
 `poll()` after a 2 s debounce. A reconnect also triggers one, to catch up on anything missed. While the
 socket is up, a safety poll runs every `POLL_FALLBACK_S` (900 s). Without a socket
 (`RM_NOTIFICATIONS_URL=off`, or while reconnecting with backoff), it polls every `POLL_INTERVAL_S` (60 s).
+
+### Logs
+
+Every process (server, poller, CLI) logs one JSON object per line to stderr, shaped for Loki:
+lowercase `level` (`debug`, `info`, `warn`, `error`), a constant `msg`, and the variable parts as
+flat snake_case fields. A traceback goes into a `stack` field, with `error` and `error_type`.
+`LOG_FORMAT=text` prints plain lines instead; `LOG_LEVEL` sets the level (default `INFO`).
+
+```json
+{"ts": "…", "level": "info", "logger": "inkbridge.poller", "msg": "notification received", "event": "SyncComplete", "source_device": "remarkable"}
+{"ts": "…", "level": "info", "logger": "inkbridge.core.cloud", "msg": "doc synced", "change": "changed", "rm_uuid": "6ae0…", "doc_name": "Spec", "location": "/Inbox", "strokes_added": 1, "strokes_removed": 1, "pages_changed": 2, "pages": "p1:+0/-1 p2:+1/-0"}
+{"ts": "…", "level": "info", "logger": "inkbridge.poller", "msg": "poll finished", "trigger": "wake", "pulled": 0, "new_ink": 1, "failed": 0, "blob_fetches": 7, "duration_s": 0.8}
+```
+
+`doc synced` describes each document a new cloud root changed (every document on the tablet, not
+only tracked ones): `change` (`new`, `gone`, `changed`), `moved_from`/`moved_to`, `renamed_from`,
+`opened`, `page_from`/`page_to`, `metadata_changed` and `files_changed` (other changed files), and
+for ink the strokes added and removed, in total and per page in `pages`. Counting strokes costs two
+blob fetches per changed page. In Loki, after your stream selector:
+`| json | msg="doc synced" | strokes_added > 0`.
 Trilium is skipped until `TRILIUM_URL`, `TRILIUM_ETAPI_TOKEN` and `TRILIUM_PARENT_NOTE` are all set.
 
 ## Things to verify on the device (M0)
@@ -106,7 +126,7 @@ These are assumptions the code makes that only the real tablet and cloud can con
 - **Notifications websocket.** The endpoint (`/notifications/ws/json/1` on the sync host, bearer
   user token) and message shape (`{"message": {"attributes": {"event": "SyncComplete", ...}}}`)
   come from rmapi/rmfakecloud. Annotate a page and move it to Outbox, then check that the poller logs
-  `notification SyncComplete` within seconds. If it logs `notifications unavailable`, set
+  `notification received` with `event` `SyncComplete` within seconds. If it logs `notifications unavailable`, set
   `RM_NOTIFICATIONS_URL` to the right host, or to `off` to go back to plain polling.
 - **Fixtures.** Tests use synthetic `.rm` pages built with rmscene (`tests/rmfixtures.py`). Add the
   three hand-annotated `.rmdoc` exports to `tests/fixtures/` once M0 works.
@@ -124,7 +144,9 @@ library and moves the pin when a new release appears.
   run `scripts/release.sh [patch|minor|major]` on `main`. Either way, the commit is tested first.
   `pyproject.toml` keeps its own version.
 - **CI** (`.github/workflows/ci.yml`) runs the tests and checks the library on every push. It also
-  builds `sha-<full sha>` images for trying a commit out.
+  builds `sha-<full sha>` images for trying a commit out. **Clean up images**
+  (`.github/workflows/ghcr-cleanup.yml`) deletes them weekly once they are 30 days old; release
+  images and `latest` stay. Run it by hand for a dry run.
 - **Manifests.** The library in `deploy/jsonnet/` is dependency-free. Vendor it, e.g. with
   jsonnet-bundler (`jb install github.com/derfred/remarkling/deploy/jsonnet@vX.Y.Z`), and render it:
 

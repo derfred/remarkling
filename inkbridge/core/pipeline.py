@@ -311,7 +311,7 @@ class InkBridge:
             try:
                 await self.transport.move(remote, self.settings.archive_folder)
             except Exception:
-                log.exception("failed to archive %s (%s)", remote.name, remote.uuid)
+                log.exception("archive failed", extra={"doc_name": remote.name, "rm_uuid": remote.uuid})
             return None
         if (known and known.status == "failed" and known.error_version == remote.version
                 and now() < retry_at(known.failed_at or 0, known.attempts)):
@@ -325,7 +325,7 @@ class InkBridge:
             stage, cause = e.stage, e.__cause__
         except Exception as e:  # after the files were written: storing the result
             stage, cause = "save", e
-        log.error("failed to pull %s (%s) at %s", remote.name, remote.uuid, stage, exc_info=cause)
+        log.error("pull failed", extra={"doc_name": remote.name, "rm_uuid": remote.uuid, "stage": stage}, exc_info=cause)
         return self._record_failure(remote, known, stage, cause)
 
     async def _pull(self, remote: RemoteDoc, known: Doc | None, archive: bool) -> PulledDoc:
@@ -338,8 +338,8 @@ class InkBridge:
             # i.e. the template and any typed text.
             original = rmdoc.pdf or ov.text_pdf
             if rmdoc.pdf is None:
-                log.info("%s has no PDF (%s); using its rendered pages", remote.name,
-                         rmdoc.content.get("fileType") or "notebook")
+                log.info("no PDF; using the rendered pages", extra={
+                    "doc_name": remote.name, "rm_uuid": remote.uuid, "file_type": rmdoc.content.get("fileType") or "notebook"})
             strips = slice_strips(ov, original)
             doc = self._identify(remote, rmdoc, known)
             stage = "save"
@@ -395,7 +395,7 @@ class InkBridge:
             try:
                 await self.transport.move(remote, self.settings.archive_folder)
             except Exception:
-                log.exception("failed to archive %s (%s); the next poll retries", remote.name, remote.uuid)
+                log.exception("archive failed; the next poll retries", extra={"doc_name": remote.name, "rm_uuid": remote.uuid})
         return _pulled(doc)
 
     def _get(self, doc_id: str | None) -> Doc | None:
@@ -454,7 +454,7 @@ class InkBridge:
         except Exception as e:
             if self._repulled(doc):
                 return
-            log.exception("failed to interpret %s", doc.doc_id)
+            log.exception("interpretation failed", extra={"doc_id": doc.doc_id})
             self._set(doc, interpret_status="failed", interpret_error=_describe(e),
                       interpret_attempts=doc.interpret_attempts + 1, interpret_failed_at=now())
             return
@@ -474,7 +474,7 @@ class InkBridge:
         then dropped: the new pull is pending interpretation itself."""
         current = self.store.get(doc.doc_id)
         if current is None or current.pulled_at != doc.pulled_at:
-            log.info("%s was pulled again during interpretation; dropping the result", doc.doc_id)
+            log.info("pulled again during interpretation; dropping the result", extra={"doc_id": doc.doc_id})
             return True
         return False
 
@@ -502,7 +502,7 @@ class InkBridge:
             )
             self._set(doc, trilium_note_id=doc.trilium_note_id, trilium_url=self.trilium.note_url(doc.trilium_note_id))
         except Exception:
-            log.exception("Trilium upload failed for %s; feedback is kept locally", doc.doc_id)
+            log.exception("Trilium upload failed; feedback is kept locally", extra={"doc_id": doc.doc_id})
 
     # --- tracked documents ------------------------------------------------------------------
     # A pushed doc is followed by its reMarkable UUID, in any folder. Its ink is the set of .rm
@@ -524,7 +524,7 @@ class InkBridge:
         for d in docs:
             remote = states.get(d.rm_uuid)
             if remote is None:
-                log.info("%s is no longer on the tablet", d.doc_id)
+                log.info("doc no longer on the tablet", extra={"doc_id": d.doc_id, "rm_uuid": d.rm_uuid})
                 self._set(d, location=None, removed_at=t)
                 continue
             fields: dict[str, Any] = {}
@@ -583,7 +583,7 @@ class InkBridge:
             content = await self.transport.download_file(d.rm_uuid, f"{d.rm_uuid}.content")
             order = RmDoc(d.rm_uuid, {f"{d.rm_uuid}.content": content}).page_ids()
         except Exception:
-            log.warning("no page order for %s", d.doc_id, exc_info=True)
+            log.warning("no page order", extra={"doc_id": d.doc_id}, exc_info=True)
             return list(page_ids)
         numbers = {p: i + 1 for i, p in enumerate(order)}
         return sorted((numbers.get(p, p) for p in page_ids), key=lambda n: (isinstance(n, str), n))
@@ -630,7 +630,7 @@ class InkBridge:
                 except Exception as e:
                     if d.rm_uuid in await self.transport.inspect([d.rm_uuid]):
                         raise
-                    log.info("%s was already gone from the tablet: %s", d.doc_id, e)
+                    log.info("doc already gone from the tablet", extra={"doc_id": d.doc_id, "error": str(e)})
             self._set(d, removed_at=d.removed_at or now(), location=None)
             removed.append(d.doc_id)
         return removed

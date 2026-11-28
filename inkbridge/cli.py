@@ -6,12 +6,12 @@ import argparse
 import asyncio
 import json
 import logging
-import sys
 from dataclasses import asdict
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
+from . import logs
 from .config import get_settings
 
 
@@ -129,11 +129,12 @@ def main(argv: list[str] | None = None) -> None:
     sub.add_parser("poller", help="run the background poller")
 
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, stream=sys.stderr)
+    logs.setup(logging.DEBUG if args.verbose else None)
     if args.cmd == "serve":
         import uvicorn
 
-        uvicorn.run("inkbridge.api:app", host=args.host, port=args.port, proxy_headers=True)
+        # log_config=None: keep our JSON handler instead of uvicorn's own format.
+        uvicorn.run("inkbridge.api:app", host=args.host, port=args.port, proxy_headers=True, log_config=None)
     elif args.cmd == "poller":
         from .poller import main as poller_main
 
