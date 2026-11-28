@@ -349,8 +349,14 @@ curl -sS --fail-with-body -T spec.md 'https://<host>/upload/<token>'   # create_
 # {"doc_id": "rm-abc123", "title": "Spec", "tablet_path": ["/Inbox/Spec · rm-abc123"], "parts": [...]}
 ```
 
-`kind` says what is sent: `pdf` (the default), `html` or `markdown`; a body that doesn't match
-(no `%PDF-` header, or not UTF-8 text) is refused with 415. The URL is good
+`kind` says what is sent: `pdf` (the default), `html`, `markdown` or `rmdoc`; a body that doesn't
+match (no `%PDF-` header, not UTF-8 text, or not a zip) is refused with 415.
+
+An `rmdoc` is a tablet document as the desktop app or `/api/docs/{uuid}/rmdoc` exports it. It goes
+to `/Inbox` unchanged, a notebook's pages and any ink included, as a new copy with its own UUID (an
+empty title keeps the document's name). The ink it arrives with is the baseline: `has_new_ink`
+and `changed_pages` count only strokes added afterwards, though a pull renders all of its ink.
+`POST /push` takes an `.rmdoc` file too. The URL is good
 for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
 with it.
 

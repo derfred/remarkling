@@ -223,14 +223,17 @@ class InkBridge:
         markdown: str | None = None,
         pdf: bytes | None = None,
         url: str | None = None,
+        rmdoc: bytes | None = None,
         ready_selector: str | None = None,
         source_kind: str | None = None,
         source_ref: str | None = None,
     ) -> PushResult:
-        given = [k for k, v in {"html": html, "markdown": markdown, "pdf": pdf, "url": url}.items() if v]
+        given = [k for k, v in {"html": html, "markdown": markdown, "pdf": pdf, "url": url, "rmdoc": rmdoc}.items() if v]
         if len(given) != 1:
-            raise ValueError("pass exactly one of html, markdown, pdf or url")
+            raise ValueError("pass exactly one of html, markdown, pdf, url or rmdoc")
         kind = given[0]
+        if kind == "rmdoc":
+            return await self._push_rmdoc(title, RmDoc.from_zip(rmdoc), source_ref)
         title = (title or "").strip() or _default_title(url) or "Untitled"
         base_id = self.store.mint_id()
 
@@ -256,6 +259,29 @@ class InkBridge:
             ))
             paths.append(f"/{self.settings.inbox_folder}/{name}")
         return PushResult(base_id, title, paths, [p.doc_id for p in parts])
+
+    async def _push_rmdoc(self, title: str | None, rmdoc: RmDoc, source_ref: str | None) -> PushResult:
+        """Push a tablet document as it is (an .rmdoc export): its PDF or notebook pages, and any ink.
+
+        The ink already in it is the baseline: has_new_ink and changed_pages count only what is
+        added after the push. A pull still renders all of the document's ink.
+        """
+        if f"{rmdoc.uuid}.content" not in rmdoc.files:
+            raise ValueError("not an .rmdoc: no .content file")
+        title = (title or "").strip() or rmdoc.metadata.get("visibleName") or "Untitled"
+        doc_id = self.store.mint_id()
+        name = render.tablet_title(title, doc_id)
+        original = rmdoc.pdf or overlay(rmdoc, rm_width=self.settings.rm_page_width_units).text_pdf
+        rm_uuid = await self.transport.upload_rmdoc(rmdoc, name, self.settings.inbox_folder)
+        d = self.doc_dir(doc_id)
+        render.write(d / "original.pdf", original)
+        render.write(d / "pushed.rmdoc", rmdoc.to_zip())
+        ink = rmdoc.ink_pages()
+        self.store.upsert(Doc(
+            doc_id=doc_id, base_id=doc_id, title=title, source_kind="rmdoc", source_ref=source_ref,
+            rm_uuid=rm_uuid, status="pushed", pushed_at=now(), dir=str(d), ink_seen=ink, ink_pulled=ink,
+        ))
+        return PushResult(doc_id, title, [f"/{self.settings.inbox_folder}/{name}"], [doc_id])
 
     # --- pull -------------------------------------------------------------------------------
     # A pull downloads a document from the Outbox, renders its ink over the original, saves the
@@ -389,7 +415,12 @@ class InkBridge:
 
     def _identify(self, remote: RemoteDoc, rmdoc: RmDoc, known: Doc | None) -> Doc:
         """The stored doc a download belongs to: by the ID stamped into its PDF, else by the ID in
-        its tablet name, else by its reMarkable UUID; a new external doc if none matches."""
+        its tablet name, else by its reMarkable UUID; a new external doc if none matches.
+
+        A doc already tracked under this reMarkable UUID wins: a pushed .rmdoc can carry the ID of
+        the doc it was exported from in its PDF."""
+        if known and known.rm_uuid == remote.uuid and known.source_kind != "external":
+            return known
         doc_id = (render.read_id(rmdoc.pdf) if rmdoc.pdf else None) or render.id_from_title(remote.name)
         doc = self._get(doc_id) or known
         if doc is None:

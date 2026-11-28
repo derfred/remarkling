@@ -43,7 +43,10 @@ mcp = MCPServer(
         "the doc_id is in curl's output. Without a shell, or if the URL is unreachable from it, pass "
         "markdown or HTML to push_document. create_upload saves context only when the bytes are already "
         "on disk: content already in your context goes to push_document; over ~50 KB, write the text you "
-        "would have passed to a file and upload that.\n\n"
+        "would have passed to a file and upload that.\n"
+        "- A tablet document (an .rmdoc export, e.g. from the desktop app or the cache explorer): "
+        "create_upload(title, \"rmdoc\"). It goes to /Inbox as it is, notebook pages and ink included, "
+        "as a new copy. Ink already in it is not counted as new, but a pull shows all of the ink.\n\n"
         "Getting annotations back: when the user says they are done, pull_document(doc_id). It fetches "
         "from the tablet, wherever the doc is, and returns only the stretches of page that hold ink, as "
         "image strips. Interpretation into marks starts after the pull, so its result usually says "
@@ -139,8 +142,9 @@ async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selec
     context. For content you already hold (an export, text you wrote), use push_document.
 
     kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
-    or "pdf" (the default; keeps its pages, for files that only exist as PDF). ready_selector (HTML)
-    waits for a CSS selector before rendering.
+    or "pdf" (the default; keeps its pages, for files that only exist as PDF), or "rmdoc" (a
+    tablet document export, pushed as it is with its pages and ink; an empty title keeps its
+    name). ready_selector (HTML) waits for a CSS selector before rendering.
 
     Run the returned "command" with <file> replaced by the path. curl prints push_document's JSON:
     keep its doc_id for pull_document. On an error it prints {"detail": ...}: 415 means the file

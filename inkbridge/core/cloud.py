@@ -689,6 +689,25 @@ class CloudTransport:
         await self._commit(mutate)
         return doc_uuid
 
+    async def upload_rmdoc(self, rmdoc: RmDoc, visible_name: str, folder: str) -> str:
+        """Upload a document's files (an .rmdoc's contents, strokes included) as a new document.
+
+        It gets a new UUID, so the original can stay on the tablet beside it, and fresh metadata
+        under `folder`. Device-local state (.local) is left behind.
+        """
+        folder_uuid = await self.ensure_folder(folder)
+        doc_uuid = new_uuid()
+        doc = rmdoc.renamed(doc_uuid)
+        files = {n: b for n, b in doc.files.items() if not n.endswith(".local")}
+        metadata = {**rmdoc.metadata, **document_metadata(visible_name, folder_uuid)}
+        files[f"{doc_uuid}.metadata"] = json.dumps(metadata).encode()
+
+        async def mutate(root: Index):
+            root.put(await self._upload_doc_files(doc_uuid, files))
+
+        await self._commit(mutate)
+        return doc_uuid
+
     async def download(self, doc: RemoteDoc) -> RmDoc:
         _, _, root = await self.get_root()
         entry = root.get(doc.uuid)

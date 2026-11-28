@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .core.store import Store
 
-KINDS = ("pdf", "html", "markdown")
+KINDS = ("pdf", "html", "markdown", "rmdoc")
 # Expired grants stay this long, as a record of what was uploaded, then are deleted.
 KEEP_S = 7 * 86400
 
@@ -32,7 +32,7 @@ class UploadError(Exception):
 @dataclass
 class Grant:
     title: str
-    kind: str  # pdf | html | markdown, declared by create_upload
+    kind: str  # pdf | html | markdown | rmdoc, declared by create_upload
     ready_selector: str | None
     expires: float
     token_hash: str
@@ -84,6 +84,10 @@ def upload_content(data: bytes, kind: str) -> dict[str, str | bytes]:
         if data[:5] != b"%PDF-":
             raise UploadError(415, 'not a PDF; for HTML or Markdown ask create_upload with kind="html" or "markdown"')
         return {"pdf": data}
+    if kind == "rmdoc":
+        if data[:4] != b"PK\x03\x04":
+            raise UploadError(415, "not an .rmdoc (a zip archive); for a PDF ask create_upload with kind=\"pdf\"")
+        return {"rmdoc": data}
     try:
         return {kind: data.decode("utf-8-sig")}
     except UnicodeDecodeError as e:
