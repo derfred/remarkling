@@ -42,7 +42,7 @@ class PushResult:
     title: str
     tablet_paths: list[str]
     parts: list[str] = field(default_factory=list)
-    layout: dict | None = None  # for PDFs: what layout="tall" did (see joinpdf.JoinResult.report)
+    layout: dict | None = None  # how the pages came out: joinpdf.JoinResult.report, or the cuts of a render
 
 
 @dataclass
@@ -253,9 +253,13 @@ class InkBridge:
         else:
             if kind == "markdown":
                 html = render.markdown_to_html(markdown, title)
-            parts = await render.render_tall_pdfs(
+            pdf, cuts = await render.render_tall_pdf(
                 base_id, title, html=html if kind != "url" else None, url=url, ready_selector=ready_selector
             )
+            parts = [render.RenderedPart(base_id, pdf, 0, 1)]
+            report = {"layout": "tall", "pages": len(cuts) + 1}
+            if cuts:
+                report["cuts"] = [{"at_mm": round(c.at / render.PX_PER_MM), "by": c.by} for c in cuts]
 
         paths = []
         for part in parts:

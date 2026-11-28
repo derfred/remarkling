@@ -384,3 +384,18 @@ async def test_push_pdf_with_layout_tall_joins_its_pages(bridge):
         assert d.page_count == 1  # what went to the tablet, and what ink is drawn over later
     with pytest.raises(ValueError):
         await bridge.push_document("x", pdf=paged_pdf(2), layout="wide")
+
+
+async def test_push_html_with_cuts_is_one_document_of_several_pages(bridge, monkeypatch):
+    from inkbridge.core import render
+    from test_joinpdf import paged_pdf
+
+    async def fake_render(doc_id, title, **kw):
+        cuts = [render.Cut(1000.0, "page"), render.Cut(19000.0, "h2")]
+        return render.stamp_id(paged_pdf(3), doc_id, title), cuts
+
+    monkeypatch.setattr(render, "render_tall_pdf", fake_render)
+    pushed = await bridge.push_document("Notes", html="<h1>Notes</h1>")
+    assert pushed.parts == [pushed.doc_id] and pushed.tablet_paths == [f"/Inbox/Notes · {pushed.doc_id}"]
+    assert pushed.layout == {"layout": "tall", "pages": 3,
+                             "cuts": [{"at_mm": 265, "by": "page"}, {"at_mm": 5027, "by": "h2"}]}

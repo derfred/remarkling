@@ -25,7 +25,10 @@ mcp = MCPServer(
         "that has a source: send the source and let the server render it. Send a PDF only when a PDF is "
         "all there is (a paper, a scan, a file the user gave you). If that PDF is one flowing text that "
         "an export or a print cut into pages, send it with layout=\"tall\" to have the server join "
-        "the pages; not for slides, scans, forms or papers whose pages stand on their own.\n\n"
+        "the pages; not for slides, scans, forms or papers whose pages stand on their own. Rendered "
+        "content that is very long (over ~5 m) continues on a second tall page of the same doc; in "
+        "HTML, break-before: page starts a new page, data-break=\"prefer\" marks where a long text "
+        "should continue if it has to, and break-inside: avoid keeps a block on one page.\n\n"
         "Sending (each way returns a doc_id; keep it, every later call needs it):\n"
         "- Text you wrote: push_document(markdown=...).\n"
         "- A Claude Docs doc (a claude.ai/artifact link can be one: your artifact tools say so): not "
@@ -96,7 +99,7 @@ async def push_document(
 
     Pass exactly one of markdown, html, url (a public page) or pdf_base64. Markdown, HTML and URLs
     are rendered to one tall scrolling page, the layout the tablet works best with; very long
-    content is split at h2 headings into several docs ("parts"), all under the one doc_id. A PDF
+    content continues on more tall pages of the same doc (see create_upload for choosing where). A PDF
     keeps its own pages, so pass one only when no source exists, and only a small one: every byte
     goes through your context. Files and anything over ~50 KB go through create_upload.
     ready_selector (HTML, url) waits for a CSS selector before rendering: JS-drawn charts, Mermaid.
@@ -148,6 +151,12 @@ async def create_upload(title: str, ctx: Context, kind: str = "pdf", ready_selec
     kind is what you will send: "markdown" or "html" (UTF-8; rendered to one tall page, preferred),
     or "pdf" (the default; keeps its pages, for files that only exist as PDF). ready_selector (HTML)
     waits for a CSS selector before rendering.
+
+    Pages of rendered content: one tall page up to ~5 m, then more tall pages of the same doc, cut at
+    the best place below the limit: an element with data-break="prefer", else an h2, an h3, a gap
+    between blocks. In HTML, break-before: page (or data-break="page") always starts a new page, for
+    an answer key or an appendix, and a block with break-inside: avoid (and every image, figure,
+    table row and pre) is never cut. The response's "layout" lists the cuts made.
 
     Run the returned "command" with <file> replaced by the path. curl prints push_document's JSON:
     keep its doc_id for pull_document. On an error it prints {"detail": ...}: 415 means the file
