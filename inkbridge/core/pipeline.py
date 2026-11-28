@@ -23,6 +23,7 @@ from urllib.parse import urlparse
 from ..config import Settings, get_settings
 from . import render
 from .interpret import Interpreter, slice_strips
+from .joinpdf import join_pages
 from .overlay import overlay
 from .store import Doc, Store, now, open_store
 from .cloud import CloudTransport, RemoteDoc
@@ -31,6 +32,9 @@ from .trilium import Trilium
 
 log = logging.getLogger(__name__)
 
+# How a pushed PDF is laid out: its own pages, or joined into tall pages (opt-in; see joinpdf).
+LAYOUTS = ("pages", "tall")
+
 
 @dataclass
 class PushResult:
@@ -38,6 +42,7 @@ class PushResult:
     title: str
     tablet_paths: list[str]
     parts: list[str] = field(default_factory=list)
+    layout: dict | None = None  # how the pages came out: joinpdf.JoinResult.report, or the cuts of a render
 
 
 @dataclass
@@ -226,6 +231,7 @@ class InkBridge:
         ready_selector: str | None = None,
         source_kind: str | None = None,
         source_ref: str | None = None,
+        layout: str = "pages",
     ) -> PushResult:
         given = [k for k, v in {"html": html, "markdown": markdown, "pdf": pdf, "url": url}.items() if v]
         if len(given) != 1:
@@ -234,14 +240,26 @@ class InkBridge:
         title = (title or "").strip() or _default_title(url) or "Untitled"
         base_id = self.store.mint_id()
 
+        if layout not in LAYOUTS:
+            raise ValueError(f"layout must be one of {', '.join(LAYOUTS)}")
+        report = None
         if kind == "pdf":
+            if layout == "tall":
+                joined = await asyncio.to_thread(join_pages, pdf)
+                pdf, report = joined.pdf, joined.report()
+            else:
+                report = {"layout": "pages"}
             parts = [render.RenderedPart(base_id, render.passthrough_pdf(pdf, base_id, title), 0, 1)]
         else:
             if kind == "markdown":
                 html = render.markdown_to_html(markdown, title)
-            parts = await render.render_tall_pdfs(
+            pdf, cuts = await render.render_tall_pdf(
                 base_id, title, html=html if kind != "url" else None, url=url, ready_selector=ready_selector
             )
+            parts = [render.RenderedPart(base_id, pdf, 0, 1)]
+            report = {"layout": "tall", "pages": len(cuts) + 1}
+            if cuts:
+                report["cuts"] = [{"at_mm": round(c.at / render.PX_PER_MM), "by": c.by} for c in cuts]
 
         paths = []
         for part in parts:
@@ -255,7 +273,7 @@ class InkBridge:
                 rm_uuid=rm_uuid, status="pushed", pushed_at=now(), dir=str(d),
             ))
             paths.append(f"/{self.settings.inbox_folder}/{name}")
-        return PushResult(base_id, title, paths, [p.doc_id for p in parts])
+        return PushResult(base_id, title, paths, [p.doc_id for p in parts], report)
 
     # --- pull -------------------------------------------------------------------------------
     # A pull downloads a document from the Outbox, renders its ink over the original, saves the

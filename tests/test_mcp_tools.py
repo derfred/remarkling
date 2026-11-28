@@ -72,6 +72,12 @@ async def test_create_upload(bridge, monkeypatch, tmp_path):
     token = result["upload_url"].rsplit("/", 1)[1]
     assert uploads.get_uploads().claim(token).title == "Spec"
 
+    tall = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "T", "layout": "tall"}))[0].text)
+    assert tall["upload_url"].endswith("?layout=tall") and tall["command"].endswith("?layout=tall'")
+    md_tall = json.loads(_blocks(await mcp.call_tool(
+        "create_upload", {"title": "T", "kind": "markdown", "layout": "tall"}))[0].text)
+    assert "applies to PDFs" in md_tall["error"]
+
     bad = json.loads(_blocks(await mcp.call_tool("create_upload", {"title": "x", "kind": "docx"}))[0].text)
     assert "kind must be" in bad["error"]
     # No PUBLIC_URL and no HTTP request to take the URL from.

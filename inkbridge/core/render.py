@@ -1,4 +1,10 @@
-"""HTML / Markdown / URL -> one PDF page exactly as tall as the content, stamped with a doc ID."""
+"""HTML / Markdown / URL -> a PDF of tall pages, each exactly as tall as its content, stamped with a doc ID.
+
+Content up to HEIGHT_CAP_PX is one page. Longer content, and content with page breaks in it, becomes
+several tall pages of one PDF (one document on the tablet). Where to cut is planned by plan_pages from
+the break marks the page carries (BREAKS_JS): CSS page breaks, data-break="prefer", headings, and
+boxes that must not be cut.
+"""
 
 from __future__ import annotations
 
@@ -66,11 +72,90 @@ EXPAND_JS = """
 }
 """
 
-# Top offsets (CSS px) of every h2, used to pick split points for very tall content.
-H2_OFFSETS_JS = """
-() => Array.from(document.querySelectorAll('h2'))
-  .map(h => h.getBoundingClientRect().top + window.scrollY)
+# Page margins added above and below the content of every page after a cut.
+CUT_MARGIN_PX = round(12 * PX_PER_MM)
+PT_PER_PX = 72 / 96
+
+# Where the content may or must be cut, in CSS px from the top of the document (see plan_pages).
+BREAKS_JS = """
+() => {
+  const y = el => el.getBoundingClientRect().top + window.scrollY;
+  const bottom = el => el.getBoundingClientRect().bottom + window.scrollY;
+  const PAGE = new Set(['page', 'always', 'left', 'right', 'recto', 'verso']);
+  const hard = [], prefer = [], avoid = [], gap = [];
+  for (const el of document.body.querySelectorAll('*')) {
+    const s = getComputedStyle(el);
+    if (s.display === 'none' || el.getClientRects().length === 0) continue;
+    if (PAGE.has(s.breakBefore) || el.dataset.break === 'page') hard.push(y(el));
+    if (PAGE.has(s.breakAfter)) hard.push(bottom(el));
+    if (el.dataset.break === 'prefer') prefer.push(y(el));
+    if (s.breakInside === 'avoid' || s.breakInside === 'avoid-page'
+        || ['IMG', 'SVG', 'CANVAS', 'VIDEO', 'FIGURE', 'TR', 'PRE'].includes(el.tagName.toUpperCase()))
+      avoid.push([y(el), bottom(el)]);
+  }
+  // Gaps between blocks: the children of the body, or of the wrapper the content sits in.
+  let box = document.body;
+  while (box.children.length === 1 && box.firstElementChild.children.length) box = box.firstElementChild;
+  const kids = Array.from(box.children).filter(el => el.getClientRects().length);
+  kids.slice(1).forEach(el => gap.push(y(el)));
+  const tops = sel => Array.from(document.querySelectorAll(sel)).map(y);
+  return {height: document.documentElement.scrollHeight, hard, prefer, avoid, gap,
+          h2: tops('h2'), h3: tops('h3')};
+}
 """
+
+# Kinds of cut, best first, when content must be cut to fit under the cap.
+CUT_RANKS = ("prefer", "h2", "h3", "gap")
+
+
+@dataclass
+class Cut:
+    at: float
+    by: str  # "page" (a page break in the content), one of CUT_RANKS, or "cap" (nothing better fit)
+
+
+def plan_pages(height: float, marks: dict, cap: float = HEIGHT_CAP_PX) -> list[Cut]:
+    """Where to cut [0, height] into pages: at every page break, and wherever a page would be taller than `cap`.
+
+    A page that is too tall is cut at the best mark in its second half (prefer, then h2, then h3, then a gap
+    between blocks), the lowest one of that kind; failing that, at the best mark anywhere on the page. A cut
+    never falls inside an `avoid` box (an image, a figure, a break-inside: avoid block) unless the box itself is
+    taller than a page. With no mark at all the page is cut at the cap, moved up to the top of an avoid box it
+    would cut through.
+    """
+    eps = 1.0
+    avoid = [(a, b) for a, b in marks.get("avoid", []) if b - a < cap]
+
+    def inside(o: float) -> bool:
+        return any(a + eps < o < b - eps for a, b in avoid)
+
+    def fits(o: float, start: float, end: float) -> bool:
+        return start + eps < o < end - eps and not inside(o)
+
+    hard = sorted({o for o in marks.get("hard", []) if eps < o < height - eps})
+    cuts: list[Cut] = []
+    start = 0.0
+    for end in [*hard, height]:
+        while end - start > cap:
+            limit = start + cap
+            pick = None
+            for lo in (start + cap / 2, start):
+                for kind in CUT_RANKS:
+                    found = [o for o in marks.get(kind, []) if fits(o, max(lo, start), limit + eps)]
+                    if found:
+                        pick = Cut(max(found), kind)
+                        break
+                if pick:
+                    break
+            if pick is None:
+                tops = [a for a, b in avoid if a < limit < b and a > start + eps]
+                pick = Cut(min(tops) if tops else limit, "cap")
+            cuts.append(pick)
+            start = pick.at
+        if end < height:
+            cuts.append(Cut(end, "page"))
+            start = end
+    return cuts
 
 
 @dataclass
@@ -97,25 +182,26 @@ def footer_html(doc_id: str, title: str) -> str:
     return f"<div class='inkbridge-footer'>{html_lib.escape(text)}</div>"
 
 
-def plan_splits(height: float, h2_offsets: list[float], cap: float = HEIGHT_CAP_PX) -> list[tuple[float, float]]:
-    """Cut [0, height] into ranges no taller than `cap`, cutting at the nearest h2 above each cap.
+def stack_windows(windows: list[bytes], margin_pt: float = CUT_MARGIN_PX * PT_PER_PX) -> bytes:
+    """One-page PDFs of consecutive windows -> one PDF with a page each, with a margin on the side of every cut.
 
-    Falls back to a hard cut at the cap when a single section is taller than the cap.
+    The margin is added here rather than in the browser, so no content outside a window can end up hidden
+    (and still in the text layer) on a page.
     """
-    ranges: list[tuple[float, float]] = []
-    start = 0.0
-    offsets = sorted(o for o in h2_offsets if o > 0)
-    while height - start > cap:
-        limit = start + cap
-        candidates = [o for o in offsets if start + 1 < o <= limit]
-        cut = candidates[-1] if candidates else limit
-        ranges.append((start, cut))
-        start = cut
-    ranges.append((start, height))
-    return ranges
+    out = pymupdf.open()
+    for i, w in enumerate(windows):
+        with pymupdf.open(stream=w, filetype="pdf") as one:
+            r = one[0].rect
+            top = margin_pt if i else 0.0
+            below = margin_pt if i < len(windows) - 1 else 0.0
+            page = out.new_page(width=r.width, height=r.height + top + below)
+            page.show_pdf_page(pymupdf.Rect(0, top, r.width, top + r.height), one, 0)
+    data = out.tobytes(garbage=3, deflate=True)
+    out.close()
+    return data
 
 
-async def render_tall_pdfs(
+async def render_tall_pdf(
     doc_id: str,
     title: str,
     *,
@@ -123,8 +209,8 @@ async def render_tall_pdfs(
     url: str | None = None,
     ready_selector: str | None = None,
     timeout_ms: int = 30_000,
-) -> list[RenderedPart]:
-    """Render HTML (or a public URL) to one or more tall single-page PDFs."""
+) -> tuple[bytes, list[Cut]]:
+    """Render HTML (or a public URL) to one PDF of tall pages, cut where plan_pages says; returns it and the cuts."""
     from playwright.async_api import async_playwright
 
     if (html is None) == (url is None):
@@ -147,14 +233,15 @@ async def render_tall_pdfs(
             await page.evaluate(
                 "(f) => document.body.insertAdjacentHTML('beforeend', f)", footer_html(doc_id, title)
             )
-            height = await page.evaluate("document.documentElement.scrollHeight")
-            offsets = await page.evaluate(H2_OFFSETS_JS)
-            ranges = plan_splits(height, offsets)
+            marks = await page.evaluate(BREAKS_JS)
+            height = marks["height"]
+            # Pages after a cut get a margin above and below, so they need that much less content.
+            cuts = plan_pages(height, marks, cap=HEIGHT_CAP_PX - 2 * CUT_MARGIN_PX)
+            bounds = [0.0, *(c.at for c in cuts), float(height)]
 
-            parts: list[RenderedPart] = []
-            for i, (start, end) in enumerate(ranges, start=1):
-                part_id = doc_id if len(ranges) == 1 else f"{doc_id}.{i}"
-                if len(ranges) > 1:
+            windows = []
+            for start, end in zip(bounds, bounds[1:]):
+                if len(bounds) > 2:
                     # Shift the content up and clip it to this window.
                     await page.evaluate(
                         """([start, h]) => {
@@ -163,16 +250,14 @@ async def render_tall_pdfs(
                         }""",
                         [start, end - start],
                     )
-                pdf = await page.pdf(
+                windows.append(await page.pdf(
                     width=f"{VIEWPORT_WIDTH_PX}px",
                     height=f"{int(end - start) + 1}px",
                     print_background=True,
                     page_ranges="1",
-                )
-                parts.append(
-                    RenderedPart(part_id, stamp_id(pdf, part_id, title), i if len(ranges) > 1 else 0, len(ranges))
-                )
-            return parts
+                ))
+            data = windows[0] if len(windows) == 1 else stack_windows(windows)
+            return stamp_id(data, doc_id, title), cuts
         finally:
             await browser.close()
 

@@ -148,6 +148,7 @@ def create_app() -> FastAPI:
         file: UploadFile | None = File(None),
         url: str | None = Form(None),
         title: str | None = Form(None),
+        layout: str = Form("pages", pattern="^(pages|tall)$"),
     ):
         bridge = get_bridge()
         if file is None and not url:
@@ -160,18 +161,22 @@ def create_app() -> FastAPI:
             ctype = (file.content_type or "").split(";")[0]
             name = title or PurePath(file.filename or "").stem or None
             if ctype == "application/pdf" or suffix == ".pdf" or data[:5] == b"%PDF-":
-                result = await bridge.push_document(name, pdf=data, source_ref=file.filename)
+                result = await bridge.push_document(name, pdf=data, source_ref=file.filename, layout=layout)
             elif ctype == "text/html" or suffix in HTML_SUFFIXES:
                 result = await bridge.push_document(name, html=data.decode(), source_ref=file.filename)
             elif ctype in ("text/markdown", "text/plain") or suffix in MARKDOWN_SUFFIXES:
                 result = await bridge.push_document(name, markdown=data.decode(), source_ref=file.filename)
             else:
                 raise HTTPException(415, f"unsupported file type {ctype or suffix}")
-        return {"doc_id": result.doc_id, "title": result.title}
+        return {"doc_id": result.doc_id, "title": result.title,
+                **({"layout": result.layout} if result.layout else {})}
 
     @app.api_route("/upload/{token}", methods=["PUT", "POST"])
-    async def upload(token: str, request: Request):
-        """The body of a create_upload URL: a PDF, HTML or Markdown file, e.g. `curl -T spec.pdf <url>`."""
+    async def upload(token: str, request: Request,
+                     layout: str = Query("pages", pattern="^(pages|tall)$")):
+        """The body of a create_upload URL: a PDF, HTML or Markdown file, e.g. `curl -T spec.pdf <url>`.
+
+        layout=tall joins a PDF's pages into tall pages (create_upload puts it in the URL)."""
         uploads = get_uploads()
         try:
             grant = uploads.claim(token)
@@ -189,7 +194,7 @@ def create_app() -> FastAPI:
             content = upload_content(bytes(body), grant.kind)
             result = await get_bridge().push_document(
                 grant.title, **content, ready_selector=grant.ready_selector if grant.kind != "pdf" else None,
-                source_ref="upload",
+                source_ref="upload", layout=layout,
             )
         except UploadError as e:
             uploads.release(grant)
@@ -202,7 +207,7 @@ def create_app() -> FastAPI:
             raise
         uploads.complete(grant, result.doc_id)
         return {"doc_id": result.doc_id, "title": result.title, "tablet_path": result.tablet_paths,
-                "parts": result.parts}
+                "parts": result.parts, **({"layout": result.layout} if result.layout else {})}
 
     # --- cache explorer: read-only REST API under /api/cache, web UI at /ui ---------------------
 

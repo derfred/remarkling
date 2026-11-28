@@ -35,7 +35,7 @@ call). A doc deleted or trashed on the tablet stops being tracked; `remove_docum
 ```
 inkbridge/
   core/
-    render.py      # HTML/MD/URL -> tall PDF (Playwright), split at h2 over 5,000 mm, stamp /InkBridgeId
+    render.py      # HTML/MD/URL -> PDF of tall pages (Playwright), cut over 5,000 mm or at page breaks, stamp /InkBridgeId
     cloud.py       # reMarkable cloud client (sync15 blob API, notifications websocket)
     rmdoc.py       # a document's files (.rmdoc contents): metadata, content, PDF, page .rm
     scene.py       # .rm (v6) page -> strokes with per-point pen data, highlights, typed text (rmscene)
@@ -353,6 +353,50 @@ curl -sS --fail-with-body -T spec.md 'https://<host>/upload/<token>'   # create_
 (no `%PDF-` header, or not UTF-8 text) is refused with 415. The URL is good
 for one upload within 15 minutes, needs no other credential, and a failed upload can be retried
 with it.
+
+### Long rendered content: more tall pages, and where they break
+
+Markdown, HTML and URLs render to one tall page up to 5,000 mm (a PDF page can be at most 200 in).
+Longer content continues on more tall pages **of the same PDF**, so it stays one doc on the tablet
+under one doc ID. Each page that starts or ends at a cut gets a 12 mm margin there. Where to cut
+(`render.plan_pages`), from what the page carries:
+
+| in the HTML | effect |
+|---|---|
+| `break-before: page` / `break-after: page` (CSS), or `data-break="page"` | always a new page here, even when the content is short: an answer key, an appendix |
+| `data-break="prefer"` | the best place to continue a long text |
+| `h2`, then `h3` | the next best, in that order |
+| a gap between top-level blocks | the fallback, so a cut never falls through a line of text |
+| `break-inside: avoid`, and every `img`, `svg`, `figure`, `pre`, `tr` | never cut through (unless the block alone is taller than a page) |
+
+A page that has to be cut is cut at the best kind of mark in its second half, the lowest one of that
+kind (a `prefer` early on the page does not beat an `h2` near the limit); failing that, at the best
+mark anywhere on it; failing that, at the limit. The push response's `layout` reports the pages and
+each cut, e.g. `{"layout": "tall", "pages": 2, "cuts": [{"at_mm": 4120, "by": "prefer"}]}`.
+Docs pushed before this were split into separate docs (`rm-xxxxxx.1`, `.2`); those still pull by
+their base ID.
+
+### Joining a PDF's pages (`layout="tall"`)
+
+A PDF that only exists as a PDF can still go as one tall page: `push_document(..., layout="tall")`,
+`create_upload(..., layout="tall")` (which puts `?layout=tall` in the URL), `POST /push` with a
+`layout=tall` form field, or `inkbridge push file.pdf --layout tall`. It is opt-in and never
+applied unasked (`core/joinpdf.py`):
+
+- Each page is cropped to what it paints, ignoring full-page backgrounds, and the crops are stacked
+  on one page as vectors, so text stays text. Blank pages are dropped. Over 14,000 pt (PDF's limit
+  is 14,400) the result continues on a second tall page.
+- Running headers and footers are cut: a line in the top or bottom 12 % of at least 60 % of the
+  pages, at the same height, with numbers masked ("Page 2 of 9"). From three pages up; a title
+  that repeats the header's words lower down is kept.
+- The pages are kept as they are, with the reason in the response's `layout`, when they differ in
+  width, are rotated, or more than a fifth of them paint something without a text layer (a scan).
+
+Meant for one flowing text cut into pages by an export or a print: browser "Save as PDF", Word or
+Docs exports. Not for slides, scans, forms or papers whose pages stand on their own; the server
+can't tell those apart reliably, which is why the agent decides. A table split across a page break
+stays split: the gap below its first half remains, and a header row the export repeated appears
+again. For a Claude Docs doc the `markdown` export is still the better path.
 
 The round trip needs no folder moves: Claude keeps the doc ID from `push_document`, the user
 annotates the doc wherever it is, and when they say so Claude calls `pull_document(doc_id)`, which

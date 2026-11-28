@@ -28,7 +28,7 @@ async def _push(args) -> None:
             title = args.title or path.stem
             suffix = path.suffix.lower()
             if suffix == ".pdf":
-                result = await bridge.push_document(title, pdf=data, source_ref=str(path))
+                result = await bridge.push_document(title, pdf=data, source_ref=str(path), layout=args.layout)
             elif suffix in (".md", ".markdown", ".txt"):
                 result = await bridge.push_document(title, markdown=data.decode(), source_ref=str(path))
             else:
@@ -101,6 +101,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("source", help="HTML, Markdown or PDF file, or an http(s) URL")
     p.add_argument("--title")
     p.add_argument("--ready-selector")
+    p.add_argument("--layout", choices=["pages", "tall"], default="pages",
+                   help="PDFs: keep their pages, or join them into tall pages (see README)")
     p.set_defaults(func=_push)
 
     p = sub.add_parser("pull", help="fetch a pushed doc's annotations from wherever it is on the tablet")
